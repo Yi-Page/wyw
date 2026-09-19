@@ -1,0 +1,117 @@
+import 'dart:async';
+
+import 'package:dlna_dart/dlna.dart';
+import 'package:flutter/material.dart';
+import 'package:wyw/bean/dialog/dialog_helper.dart';
+import 'package:wyw/services/logging/log_tags.dart';
+import 'package:wyw/services/logging/logger.dart';
+
+class RemotePlay {
+  Future<void> castVideo(String video) async {
+    final searcher = DLNAManager();
+    final dlna = await searcher.start();
+    List<Widget> dlnaDevice = [];
+    await WywDialog.show(builder: (BuildContext context) {
+      return StatefulBuilder(builder: (context, setState) {
+        return AlertDialog(
+          title: const Text('远程投屏'),
+          content: SingleChildScrollView(
+            child: Column(
+              children: dlnaDevice,
+            ),
+          ),
+          actions: [
+            const SizedBox(width: 20),
+            TextButton(
+              onPressed: () {
+                WywDialog.dismiss();
+              },
+              child: Text(
+                '退出',
+                style: TextStyle(color: Theme.of(context).colorScheme.outline),
+              ),
+            ),
+            TextButton(
+                onPressed: () {
+                  setState(() {});
+                  WywDialog.showToast(
+                    message: '开始搜索',
+                  );
+                  dlna.devices.stream.listen((deviceList) {
+                    dlnaDevice = [];
+                    deviceList.forEach((key, value) async {
+                      WywLogger().i('${LogTag.player} 发现 DLNA 设备 key=$key');
+                      WywLogger().i(
+                          '${LogTag.player} DLNA 设备信息 friendlyName=${value.info.friendlyName} deviceType=${value.info.deviceType} URLBase=${value.info.URLBase}');
+                      setState(() {
+                        dlnaDevice.add(ListTile(
+                            leading: _deviceUPnPIcon(
+                                value.info.deviceType.split(':')[3]),
+                            title: Text(value.info.friendlyName),
+                            subtitle: Text(value.info.deviceType.split(':')[3]),
+                            onTap: () {
+                              try {
+                                WywDialog.showToast(
+                                  message: '尝试投屏至 ${value.info.friendlyName}',
+                                );
+                                DLNADevice(value.info).setUrl(video);
+                                DLNADevice(value.info).play();
+                              } catch (e, s) {
+                                WywLogger().e(
+                                    '${LogTag.player} 投屏到设备失败 device=${value.info.friendlyName}',
+                                    error: e,
+                                    stackTrace: s);
+                                WywDialog.showToast(
+                                  message: 'DLNA 异常: $e \n尝试重新进入 DLNA 投屏或切换设备',
+                                );
+                              }
+                            }));
+                      });
+                    });
+                  });
+                  // Timer(const Duration(seconds: 30), () {
+                  //   WywDialog.showToast(
+                  //     message: '已搜索30s，若未发现设备请尝试重新进入 DLNA 投屏',
+                  //   );
+                  // });
+                },
+                child: Text(
+                  '搜索',
+                  style:
+                      TextStyle(color: Theme.of(context).colorScheme.outline),
+                )),
+          ],
+        );
+      });
+    }, onDismiss: () {
+      searcher.stop();
+    });
+  }
+
+  Icon _deviceUPnPIcon(String deviceType) {
+    switch (deviceType) {
+      case 'MediaRenderer':
+        return const Icon(Icons.cast_connected);
+      case 'MediaServer':
+        return const Icon(Icons.cast_connected);
+      case 'InternetGatewayDevice':
+        return const Icon(Icons.router);
+      case 'BasicDevice':
+        return const Icon(Icons.device_hub);
+      case 'DimmableLight':
+        return const Icon(Icons.lightbulb);
+      case 'WLANAccessPoint':
+        return const Icon(Icons.lan);
+      case 'WLANConnectionDevice':
+        return const Icon(Icons.wifi_tethering);
+      case 'Printer':
+        return const Icon(Icons.print);
+      case 'Scanner':
+        return const Icon(Icons.scanner);
+      case 'DigitalSecurityCamera':
+        return const Icon(Icons.camera_enhance_outlined);
+      default:
+        return const Icon(Icons.question_mark);
+    }
+  }
+}

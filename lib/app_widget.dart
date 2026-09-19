@@ -1,0 +1,355 @@
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:flutter_modular/flutter_modular.dart';
+import 'package:dynamic_color/dynamic_color.dart';
+import 'package:flutter_displaymode/flutter_displaymode.dart';
+import 'package:wyw/services/storage/storage.dart';
+import 'package:tray_manager/tray_manager.dart';
+import 'package:wyw/services/logging/logger.dart';
+import 'package:wyw/services/logging/log_tags.dart';
+import 'package:window_manager/window_manager.dart';
+import 'package:wyw/bean/dialog/dialog_helper.dart';
+import 'package:wyw/bean/settings/color_type.dart';
+import 'package:wyw/bean/settings/theme_provider.dart';
+import 'package:wyw/navigation.dart';
+import 'package:wyw/utils/constants.dart';
+import 'package:wyw/utils/device.dart';
+import 'package:wyw/utils/theme.dart';
+
+class AppWidget extends StatefulWidget {
+  const AppWidget({super.key});
+
+  @override
+  State<AppWidget> createState() => _AppWidgetState();
+}
+
+class _AppWidgetState extends State<AppWidget>
+    with TrayListener, WidgetsBindingObserver, WindowListener {
+  final TrayManager trayManager = TrayManager.instance;
+  bool showingExitDialog = false;
+  bool _didApplyStoredThemeSettings = false;
+  Brightness? _lastTitleBarBrightness;
+
+  @override
+  void initState() {
+    super.initState();
+    trayManager.addListener(this);
+    windowManager.addListener(this);
+    WidgetsBinding.instance.addObserver(this);
+    _initializePlatformIntegrations();
+  }
+
+  Future<void> _initializePlatformIntegrations() async {
+    if (isDesktop()) {
+      await windowManager.setPreventClose(true);
+      await _handleTray();
+    }
+    await _configurePreferredDisplayMode();
+  }
+
+  Future<void> _configurePreferredDisplayMode() async {
+    if (!Platform.isAndroid) return;
+
+    try {
+      final modes = await FlutterDisplayMode.supported;
+      final storageDisplay = GStorage.getSetting(SettingsKeys.displayMode);
+      DisplayMode selectedMode = DisplayMode.auto;
+      if (storageDisplay != null) {
+        selectedMode = modes.firstWhere(
+          (e) => e.toString() == storageDisplay,
+          orElse: () => DisplayMode.auto,
+        );
+      }
+      final preferred = modes.firstWhere(
+        (el) => el == selectedMode,
+        orElse: () => DisplayMode.auto,
+      );
+      await FlutterDisplayMode.setPreferredMode(preferred);
+    } catch (e) {
+      WywLogger().e('${LogTag.app} 设置屏幕刷新率失败', error: e);
+    }
+  }
+
+  @override
+  void dispose() {
+    trayManager.removeListener(this);
+    windowManager.removeListener(this);
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final themeProvider = context.watch<ThemeProvider>();
+    _applyStoredThemeSettings(themeProvider);
+    _syncWindowsTitleBarBrightness(themeProvider);
+  }
+
+  void _applyStoredThemeSettings(ThemeProvider themeProvider) {
+    if (_didApplyStoredThemeSettings) return;
+    _didApplyStoredThemeSettings = true;
+
+    themeProvider.setThemeMode(_storedThemeMode(), notify: false);
+    themeProvider.setDynamic(
+      GStorage.getSetting(SettingsKeys.useDynamicColor),
+      notify: false,
+    );
+    themeProvider.setFontFamily(
+      GStorage.getSetting(SettingsKeys.useSystemFont),
+      notify: false,
+    );
+
+    final color = _storedThemeColor();
+    final oledEnhance = GStorage.getSetting(SettingsKeys.oledEnhance);
+    final defaultDarkTheme = _buildAppTheme(
+      brightness: Brightness.dark,
+      color: color,
+      fontFamily: themeProvider.currentFontFamily,
+    );
+    themeProvider.setTheme(
+      _buildAppTheme(
+        brightness: Brightness.light,
+        color: color,
+        fontFamily: themeProvider.currentFontFamily,
+      ),
+      oledEnhance ? oledDarkTheme(defaultDarkTheme) : defaultDarkTheme,
+      notify: false,
+    );
+  }
+
+  ThemeMode _storedThemeMode() {
+    return switch (GStorage.getSetting(SettingsKeys.themeMode)) {
+      'dark' => ThemeMode.dark,
+      'light' => ThemeMode.light,
+      _ => ThemeMode.system,
+    };
+  }
+
+  Color _storedThemeColor() {
+    final defaultThemeColor = GStorage.getSetting(SettingsKeys.themeColor);
+    if (defaultThemeColor == 'default') {
+      // 默认种子色引用 color_type 的 palette，保持单一来源
+      return colorThemeTypes.first['color'] as Color;
+    }
+    return Color(int.parse(defaultThemeColor, radix: 16));
+  }
+
+  ThemeData _buildAppTheme({
+    required Brightness brightness,
+    required String? fontFamily,
+    Color? color,
+    ColorScheme? colorScheme,
+  }) {
+    return ThemeData(
+      useMaterial3: true,
+      fontFamily: fontFamily,
+      brightness: brightness,
+      colorSchemeSeed: color,
+      colorScheme: colorScheme,
+      progressIndicatorTheme: progressIndicatorTheme2024,
+      sliderTheme: sliderTheme2024,
+      pageTransitionsTheme: pageTransitionsTheme2024,
+    );
+  }
+
+  void _syncWindowsTitleBarBrightness(ThemeProvider themeProvider) {
+    if (!Platform.isWindows) return;
+
+    final brightness =
+        themeProvider.isEffectiveDark() ? Brightness.dark : Brightness.light;
+    if (_lastTitleBarBrightness == brightness) return;
+
+    _lastTitleBarBrightness = brightness;
+    windowManager.setBrightness(brightness).catchError((e) {
+      WywLogger().w('${LogTag.app} 设置窗口标题栏亮度失败', error: e);
+    });
+  }
+
+  @override
+  void onTrayIconMouseDown() {
+    windowManager.show();
+  }
+
+  @override
+  void onTrayIconRightMouseDown() {
+    trayManager.popUpContextMenu();
+  }
+
+  @override
+  void onTrayMenuItemClick(MenuItem menuItem) {
+    switch (menuItem.key) {
+      case 'show_window':
+        windowManager.show();
+      case 'exit':
+        exit(0);
+    }
+  }
+
+  /// 处理窗口关闭事件，
+  /// 需要使用 `windowManager.close()` 来触发，`exit(0)` 会直接退出程序
+  @override
+  void onWindowClose() {
+    final exitBehavior = GStorage.getSetting(SettingsKeys.exitBehavior);
+
+    switch (exitBehavior) {
+      case 0:
+        exit(0);
+      case 1:
+        WywDialog.dismiss();
+        windowManager.hide();
+        break;
+      default:
+        if (showingExitDialog) return;
+        showingExitDialog = true;
+        WywDialog.show(onDismiss: () {
+          showingExitDialog = false;
+        }, builder: (context) {
+          bool saveExitBehavior = false; // 下次不再询问？
+
+          return AlertDialog(
+            title: const Text('退出确认'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text('您想要退出 Wyw 吗？'),
+                const SizedBox(height: 24),
+                StatefulBuilder(builder: (context, setState) {
+                  onChanged(value) {
+                    saveExitBehavior = value ?? false;
+                    setState(() {});
+                  }
+
+                  return Wrap(
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 8,
+                    children: [
+                      Checkbox(value: saveExitBehavior, onChanged: onChanged),
+                      const Text('下次不再询问'),
+                    ],
+                  );
+                }),
+              ],
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () async {
+                    if (saveExitBehavior) {
+                      await GStorage.putSetting(SettingsKeys.exitBehavior, 0);
+                    }
+                    exit(0);
+                  },
+                  child: const Text('退出 Wyw')),
+              TextButton(
+                  onPressed: () async {
+                    if (saveExitBehavior) {
+                      await GStorage.putSetting(SettingsKeys.exitBehavior, 1);
+                    }
+                    WywDialog.dismiss();
+                    windowManager.hide();
+                  },
+                  child: const Text('最小化至托盘')),
+              const TextButton(onPressed: WywDialog.dismiss, child: Text('取消')),
+            ],
+          );
+        });
+    }
+  }
+
+  /// 处理前后台变更
+  /// windows/linux 在程序后台或失去焦点时只会触发 inactive 不会触发 paused
+  /// android/ios/macos 在程序后台时会先触发 inactive 再触发 paused, 回到前台时会先触发 inactive 再触发 resumed
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) async {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.paused) {
+      WywLogger().i('${LogTag.app} 应用进入后台 state=paused');
+    } else if (state == AppLifecycleState.resumed) {
+      WywLogger().i('${LogTag.app} 应用回到前台 state=resumed');
+    } else if (state == AppLifecycleState.inactive) {
+      WywLogger().i('${LogTag.app} 应用进入非活跃状态 state=inactive');
+    }
+  }
+
+  @override
+  Future<void> didChangePlatformBrightness() async {
+    super.didChangePlatformBrightness();
+    final ThemeProvider themeProvider = context.read<ThemeProvider>();
+    WywLogger().i('${LogTag.app} 系统亮度变化 themeMode=${themeProvider.themeMode}');
+
+    _syncWindowsTitleBarBrightness(themeProvider);
+  }
+
+  Future<void> _handleTray() async {
+    if (Platform.isWindows) {
+      // Windows 托盘必须用经典 BMP 条目的 .ico（LoadImage 不支持 PNG 压缩条目）
+      await trayManager.setIcon('assets/images/logo/logo_tray.ico');
+    } else if (Platform.environment.containsKey('FLATPAK_ID') ||
+        Platform.environment.containsKey('SNAP')) {
+      await trayManager.setIcon('io.github.Yi-Page.wyw');
+    } else {
+      await trayManager.setIcon('assets/images/logo/logo.png');
+    }
+
+    if (!Platform.isLinux) {
+      await trayManager.setToolTip('Wyw');
+    }
+
+    Menu trayMenu = Menu(items: [
+      MenuItem(key: 'show_window', label: '显示窗口'),
+      MenuItem.separator(),
+      MenuItem(key: 'exit', label: '退出 Wyw')
+    ]);
+    await trayManager.setContextMenu(trayMenu);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeProvider themeProvider = context.watch<ThemeProvider>();
+    bool oledEnhance = GStorage.getSetting(SettingsKeys.oledEnhance);
+
+    var app = DynamicColorBuilder(
+      builder: (theme, darkTheme) {
+        final useDynamicColor =
+            themeProvider.useDynamicColor && theme != null && darkTheme != null;
+        final lightTheme = useDynamicColor
+            ? _buildAppTheme(
+                brightness: Brightness.light,
+                colorScheme: theme,
+                fontFamily: themeProvider.currentFontFamily,
+              )
+            : themeProvider.light;
+        final dynamicDarkTheme = useDynamicColor
+            ? _buildAppTheme(
+                brightness: Brightness.dark,
+                colorScheme: darkTheme,
+                fontFamily: themeProvider.currentFontFamily,
+              )
+            : themeProvider.dark;
+        final effectiveDarkTheme = useDynamicColor && oledEnhance
+            ? oledDarkTheme(dynamicDarkTheme)
+            : dynamicDarkTheme;
+
+        return MaterialApp.router(
+          title: 'Wyw',
+          localizationsDelegates: GlobalMaterialLocalizations.delegates,
+          supportedLocales: const [
+            Locale.fromSubtags(
+                languageCode: 'zh', scriptCode: 'Hans', countryCode: 'CN')
+          ],
+          locale: const Locale.fromSubtags(
+              languageCode: 'zh', scriptCode: 'Hans', countryCode: 'CN'),
+          theme: lightTheme,
+          darkTheme: effectiveDarkTheme,
+          themeMode: themeProvider.themeMode,
+          scaffoldMessengerKey: rootScaffoldMessengerKey,
+          routerConfig: ModularApp.routerConfigOf(context),
+        );
+      },
+    );
+
+    return app;
+  }
+}

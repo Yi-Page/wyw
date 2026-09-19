@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+ln -sf /opt/Wyw/wyw /usr/bin/wyw
+chmod +x /usr/bin/wyw
+update-mime-database /usr/share/mime || true
+update-desktop-database /usr/share/applications || true
+exit 0

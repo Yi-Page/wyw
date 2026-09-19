@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+rm -f /usr/bin/wyw
+# 清理旧版本（kazumi 时期）遗留的二进制
+rm -f /usr/bin/kazumi
+update-mime-database /usr/share/mime || true
+update-desktop-database /usr/share/applications || true
+exit 0
