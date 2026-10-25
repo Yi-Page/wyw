@@ -34,10 +34,13 @@ import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:flutter_mobx/flutter_mobx.dart';
 
+import 'package:wyw/bean/appbar/drag_to_move_bar.dart' as dtb;
 import 'package:wyw/bean/dialog/dialog_helper.dart';
+import 'package:wyw/bean/widget/kazumi_menu.dart';
 import 'package:wyw/services/logging/log_tags.dart';
 import 'package:wyw/services/logging/logger.dart';
 import 'package:wyw/services/network/image_cache_manager.dart';
+import 'package:wyw/services/platform/screen_orientation.dart';
 import 'package:wyw/utils/device.dart';
 
 import '../image/image_downloader.dart';

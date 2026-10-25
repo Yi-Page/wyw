@@ -194,8 +194,7 @@ abstract class _ComicReaderController with Store {
       var seen = (cp['seenUpToImage'] as num?)?.toInt() ?? 0;
       if (seen <= 0) {
         // 旧数据没有水位线：已完成（旧容差判定）抬到图片总数，否则以当前位置起算。
-        final legacyFinished =
-            imageCount > 0 && legacyPage >= imageCount - 1;
+        final legacyFinished = imageCount > 0 && legacyPage >= imageCount - 1;
         seen = legacyFinished ? imageCount : imageIndex;
       }
       if (seen > 0) _seenUpToByChapterId[id] = seen;

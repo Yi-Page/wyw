@@ -57,35 +57,51 @@ mixin _$PluginController on _PluginController, Store {
     });
   }
 
-  late final _$lastErrorAtom =
-      Atom(name: '_PluginController.lastError', context: context);
+  late final _$indexCorruptAtom =
+      Atom(name: '_PluginController.indexCorrupt', context: context);
 
   @override
-  String? get lastError {
-    _$lastErrorAtom.reportRead();
-    return super.lastError;
+  bool get indexCorrupt {
+    _$indexCorruptAtom.reportRead();
+    return super.indexCorrupt;
   }
 
   @override
-  set lastError(String? value) {
-    _$lastErrorAtom.reportWrite(value, super.lastError, () {
-      super.lastError = value;
+  set indexCorrupt(bool value) {
+    _$indexCorruptAtom.reportWrite(value, super.indexCorrupt, () {
+      super.indexCorrupt = value;
     });
   }
 
-  late final _$selectedPluginNameAtom =
-      Atom(name: '_PluginController.selectedPluginName', context: context);
+  late final _$categoriesAtom =
+      Atom(name: '_PluginController.categories', context: context);
 
   @override
-  String? get selectedPluginName {
-    _$selectedPluginNameAtom.reportRead();
-    return super.selectedPluginName;
+  PluginCategoryRegistry get categories {
+    _$categoriesAtom.reportRead();
+    return super.categories;
   }
 
   @override
-  set selectedPluginName(String? value) {
-    _$selectedPluginNameAtom.reportWrite(value, super.selectedPluginName, () {
-      super.selectedPluginName = value;
+  set categories(PluginCategoryRegistry value) {
+    _$categoriesAtom.reportWrite(value, super.categories, () {
+      super.categories = value;
+    });
+  }
+
+  late final _$pluginNameDisplayAtom =
+      Atom(name: '_PluginController.pluginNameDisplay', context: context);
+
+  @override
+  String get pluginNameDisplay {
+    _$pluginNameDisplayAtom.reportRead();
+    return super.pluginNameDisplay;
+  }
+
+  @override
+  set pluginNameDisplay(String value) {
+    _$pluginNameDisplayAtom.reportWrite(value, super.pluginNameDisplay, () {
+      super.pluginNameDisplay = value;
     });
   }
 
@@ -105,38 +121,41 @@ mixin _$PluginController on _PluginController, Store {
     return _$rescanAsyncAction.run(() => super.rescan());
   }
 
-  late final _$addItemFromPathAsyncAction =
-      AsyncAction('_PluginController.addItemFromPath', context: context);
+  late final _$movePluginAsyncAction =
+      AsyncAction('_PluginController.movePlugin', context: context);
 
   @override
-  Future<bool> addItemFromPath({required String filePath}) {
-    return _$addItemFromPathAsyncAction
-        .run(() => super.addItemFromPath(filePath: filePath));
+  Future<void> movePlugin({required String name, String? beforeName}) {
+    return _$movePluginAsyncAction
+        .run(() => super.movePlugin(name: name, beforeName: beforeName));
+  }
+
+  late final _$addPluginAsyncAction =
+      AsyncAction('_PluginController.addPlugin', context: context);
+
+  @override
+  Future<PluginCreateResult> addPlugin(Plugin plugin) {
+    return _$addPluginAsyncAction.run(() => super.addPlugin(plugin));
   }
 
   late final _$createAsyncAction =
       AsyncAction('_PluginController.create', context: context);
 
   @override
-  Future<Plugin?> create(String name, String content) {
-    return _$createAsyncAction.run(() => super.create(name, content));
+  Future<PluginCreateResult> create(String name, String content,
+      {bool adoptExistingFile = false}) {
+    return _$createAsyncAction.run(() =>
+        super.create(name, content, adoptExistingFile: adoptExistingFile));
   }
 
   late final _$updateItemAsyncAction =
       AsyncAction('_PluginController.updateItem', context: context);
 
   @override
-  Future<bool> updateItem({required String name, required String content}) {
+  Future<PluginOpResult> updateItem(
+      {required String name, required String content}) {
     return _$updateItemAsyncAction
         .run(() => super.updateItem(name: name, content: content));
-  }
-
-  late final _$removeItemAsyncAction =
-      AsyncAction('_PluginController.removeItem', context: context);
-
-  @override
-  Future<bool> removeItem(String name) {
-    return _$removeItemAsyncAction.run(() => super.removeItem(name));
   }
 
   late final _$openBrowseEntryAsyncAction =
@@ -153,22 +172,11 @@ mixin _$PluginController on _PluginController, Store {
       ActionController(name: '_PluginController', context: context);
 
   @override
-  void reorder(int oldIndex, int newIndex) {
+  void updatePlugin(Plugin plugin) {
     final _$actionInfo = _$_PluginControllerActionController.startAction(
-        name: '_PluginController.reorder');
+        name: '_PluginController.updatePlugin');
     try {
-      return super.reorder(oldIndex, newIndex);
-    } finally {
-      _$_PluginControllerActionController.endAction(_$actionInfo);
-    }
-  }
-
-  @override
-  void select(String? name) {
-    final _$actionInfo = _$_PluginControllerActionController.startAction(
-        name: '_PluginController.select');
-    try {
-      return super.select(name);
+      return super.updatePlugin(plugin);
     } finally {
       _$_PluginControllerActionController.endAction(_$actionInfo);
     }
@@ -180,8 +188,9 @@ mixin _$PluginController on _PluginController, Store {
 plugins: ${plugins},
 initialized: ${initialized},
 loading: ${loading},
-lastError: ${lastError},
-selectedPluginName: ${selectedPluginName}
+indexCorrupt: ${indexCorrupt},
+categories: ${categories},
+pluginNameDisplay: ${pluginNameDisplay}
     ''';
   }
 }

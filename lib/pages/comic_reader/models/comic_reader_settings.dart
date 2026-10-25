@@ -29,6 +29,9 @@ class ComicReaderSettings {
     'readerScrollSpeed': 1.0,
     'quickCollectImage': 'No',
     'continuousChapterSwitchThreshold': 80.0,
+    // 「进入时默认锁定方向」已退场：阅读器方向收归「界面设置 → 屏幕方向」的
+    // readerScreenOrientation（默认竖屏锁定）。旧键只由
+    // ScreenOrientationService 做一次性迁移读取。
   };
 
   /// 读取设置；未持久化时返回默认值。

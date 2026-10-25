@@ -155,6 +155,11 @@ class SettingsKeys {
     0.0,
     group: SettingGroup.danmaku,
   );
+  static const danmakuChConvert = SettingKey<int>(
+    _SettingBoxKey.danmakuChConvert,
+    0,
+    group: SettingGroup.danmaku,
+  );
   static const danmakuEnabledByDefault = SettingKey<bool>(
     _SettingBoxKey.danmakuEnabledByDefault,
     false,
@@ -375,6 +380,29 @@ class SettingsKeys {
     'playAndDownload',
     group: SettingGroup.player,
   );
+
+  /// 选择播放方式后是否「整页沿用」：进入播放器后切换集数时继续使用进入时
+  /// 选择的方式（合流 / 直接播放），不逐集询问。这是「选择播放方式」弹窗里
+  /// 沿用开关的默认值（弹窗内可临时改，只对本次会话生效）。
+  static const followPlayModeInPlayer = SettingKey<bool>(
+    'followPlayModeInPlayer',
+    true,
+    group: SettingGroup.player,
+  );
+
+  /// 画面调节滤镜预设（JSON 数组，见 `VideoFilterPreset.toJson`）。
+  static const videoFilterPresets = SettingKey<String>(
+    'videoFilterPresets',
+    '[]',
+    group: SettingGroup.player,
+  );
+
+  /// 当前活动滤镜预设 id（'' = 关闭滤镜）。
+  static const videoFilterActivePresetId = SettingKey<String>(
+    'videoFilterActivePresetId',
+    '',
+    group: SettingGroup.player,
+  );
   static const playerControllerLayerDisappearTime = SettingKey<int>(
     'playerControllerLayerDisappearTime',
     4000,
@@ -391,12 +419,101 @@ class SettingsKeys {
     group: SettingGroup.player,
   );
 
+  /// 分屏面板宽度（横屏，**像素**；`0` = 未自定义，取
+  /// `clamp(可用宽 / 3, 320, 420)`）。与 [playerSplitRatioPortrait] 单位不同。
+  static const playerSplitRatioLandscape = SettingKey<double>(
+    'playerSplitRatioLandscape',
+    0.0,
+    group: SettingGroup.player,
+  );
+
+  /// 分屏面板高度占比（竖屏，**容器高的比例**；`0` = 未自定义，取 45%）。
+  static const playerSplitRatioPortrait = SettingKey<double>(
+    'playerSplitRatioPortrait',
+    0.0,
+    group: SettingGroup.player,
+  );
+
   /// 应用启动时的初始窗口大小预设（'auto' / 'small' / 'medium' / 'large' /
   /// 'xlarge'，见 constants.dart 的 initialWindowSizePresets）。仅桌面端生效。
   static const initialWindowSize = SettingKey<String>(
     'initialWindowSize',
     'auto',
     group: SettingGroup.interface,
+  );
+
+  /// 插件名称在界面上的显示方式（见 `PluginController.displayNameOf`）：
+  ///   - `'display'`（默认）：用户覆盖 > 插件自称（`// name:` / 类字段）> 插件名；
+  ///   - `'name'`：一律显示插件名（= 文件名 = JS 类名，即插件的唯一标识）。
+  ///
+  /// 「插件名」是标识，用于 tab key / 调用 / 配置键；把它显示出来便于与插件目录、
+  /// 报错信息、插件文档里的名字对上号。
+  static const pluginNameDisplay = SettingKey<String>(
+    'pluginNameDisplay',
+    'display',
+    group: SettingGroup.interface,
+  );
+
+  /// 屏幕方向：播放器 / 漫画阅读器**之外**的界面用哪一档。
+  ///
+  /// 取值见 `ScreenOrientationService` 的 `ScreenOrientationPolicy`：
+  ///   - `'system'`（默认）：跟随系统，系统「自动旋转」开着才转；
+  ///   - `'free'`：自由旋转，**覆盖**系统「自动旋转」开关（Android `FULL_SENSOR`）；
+  ///   - `'landscape'` / `'portrait'`：横屏 / 竖屏锁定。
+  static const appScreenOrientation = SettingKey<String>(
+    'appScreenOrientation',
+    'system',
+    group: SettingGroup.interface,
+  );
+
+  /// 播放器进入时的方向。默认自由旋转：一进播放页就能转（覆盖系统开关）。
+  ///
+  /// 只取 `'free'` / `'landscape'` / `'portrait'`——播放页要「完全自由控制」，
+  /// 不提供「跟随系统」这种含糊态。
+  static const playerScreenOrientation = SettingKey<String>(
+    'playerScreenOrientation',
+    'free',
+    group: SettingGroup.interface,
+  );
+
+  /// 漫画阅读器进入时的方向（默认竖屏锁定）。取值同 [playerScreenOrientation]。
+  static const readerScreenOrientation = SettingKey<String>(
+    'readerScreenOrientation',
+    'portrait',
+    group: SettingGroup.interface,
+  );
+
+  /// 横屏锁定朝哪一侧（`'left'` / `'right'`）。
+  ///
+  /// 仅当应用 / 播放器 / 漫画阅读器任一处选了横屏锁定时才生效；播放页与阅读器内
+  /// 的方向按钮随时可切到对侧（只影响本次，不改这里）。
+  static const landscapeDefaultSide = SettingKey<String>(
+    'landscapeDefaultSide',
+    'left',
+    group: SettingGroup.interface,
+  );
+
+  /// 收藏模块中「未收藏」条目的保留上限：
+  ///   - `0`（默认）= 无上限（全留）
+  ///   - `N > 0` = 超出 N 条时按最近访问时间最旧优先自动清理
+  ///
+  /// **已收藏条目永不参与自动清理。**
+  static const uncollectedLimit = SettingKey<int>(
+    'uncollectedLimit',
+    0,
+    group: SettingGroup.misc,
+  );
+
+  /// 收藏页「进入时的默认页签」：
+  ///   - `-1`（默认）= 全部
+  ///   - 其余 = `CollectType` 的数值（0 未收藏 / 1 在看 / 2 想看 / 3 搁置 /
+  ///     4 看过 / 5 抛弃）
+  ///
+  /// 存状态数值而不是 tab 下标，避免 tab 顺序调整后设置错位。
+  static const collectDefaultTab = SettingKey<int>(
+    'collectDefaultTab',
+    -1,
+    group: SettingGroup.misc,
   );
 
   static final List<SettingKey<Object?>> all = [
@@ -424,6 +541,7 @@ class SettingsKeys {
     danmakuDuration,
     danmakuLineHeight,
     danmakuTimeOffset,
+    danmakuChConvert,
     danmakuEnabledByDefault,
     danmakuBiliBiliSource,
     danmakuGamerSource,
@@ -467,10 +585,22 @@ class SettingsKeys {
     shortcutDialogShown,
     brightnessVolumeGesture,
     playbackDownloadMode,
+    followPlayModeInPlayer,
+    videoFilterPresets,
+    videoFilterActivePresetId,
     playerControllerLayerDisappearTime,
     defaultVolume,
     playerMuted,
+    playerSplitRatioLandscape,
+    playerSplitRatioPortrait,
     initialWindowSize,
+    pluginNameDisplay,
+    appScreenOrientation,
+    playerScreenOrientation,
+    readerScreenOrientation,
+    landscapeDefaultSide,
+    uncollectedLimit,
+    collectDefaultTab,
   ];
 
   static List<SettingKey<Object?>> byGroup(SettingGroup group) {
@@ -512,6 +642,7 @@ class _SettingBoxKey {
       danmakuDuration = 'danmakuDuration',
       danmakuLineHeight = 'danmakuLineHeight',
       danmakuTimeOffset = 'danmakuTimeOffset',
+      danmakuChConvert = 'danmakuChConvert',
       danmakuEnabledByDefault = 'danmakuEnabledByDefault',
       danmakuBiliBiliSource = 'danmakuBiliBiliSource',
       danmakuGamerSource = 'danmakuGamerSource',

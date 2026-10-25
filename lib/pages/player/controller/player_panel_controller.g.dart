@@ -185,8 +185,178 @@ mixin _$PlayerPanelController on _PlayerPanelController, Store {
     });
   }
 
+  late final _$splitPanelVisibleAtom =
+      Atom(name: '_PlayerPanelController.splitPanelVisible', context: context);
+
+  @override
+  bool get splitPanelVisible {
+    _$splitPanelVisibleAtom.reportRead();
+    return super.splitPanelVisible;
+  }
+
+  @override
+  set splitPanelVisible(bool value) {
+    _$splitPanelVisibleAtom.reportWrite(value, super.splitPanelVisible, () {
+      super.splitPanelVisible = value;
+    });
+  }
+
+  late final _$splitPanelTabAtom =
+      Atom(name: '_PlayerPanelController.splitPanelTab', context: context);
+
+  @override
+  SplitPanelTab get splitPanelTab {
+    _$splitPanelTabAtom.reportRead();
+    return super.splitPanelTab;
+  }
+
+  @override
+  set splitPanelTab(SplitPanelTab value) {
+    _$splitPanelTabAtom.reportWrite(value, super.splitPanelTab, () {
+      super.splitPanelTab = value;
+    });
+  }
+
+  late final _$splitPanelSubPageAtom =
+      Atom(name: '_PlayerPanelController.splitPanelSubPage', context: context);
+
+  @override
+  SplitSubPage? get splitPanelSubPage {
+    _$splitPanelSubPageAtom.reportRead();
+    return super.splitPanelSubPage;
+  }
+
+  @override
+  set splitPanelSubPage(SplitSubPage? value) {
+    _$splitPanelSubPageAtom.reportWrite(value, super.splitPanelSubPage, () {
+      super.splitPanelSubPage = value;
+    });
+  }
+
+  late final _$splitPanelWidthAtom =
+      Atom(name: '_PlayerPanelController.splitPanelWidth', context: context);
+
+  @override
+  double get splitPanelWidth {
+    _$splitPanelWidthAtom.reportRead();
+    return super.splitPanelWidth;
+  }
+
+  @override
+  set splitPanelWidth(double value) {
+    _$splitPanelWidthAtom.reportWrite(value, super.splitPanelWidth, () {
+      super.splitPanelWidth = value;
+    });
+  }
+
+  late final _$splitPanelHeightFractionAtom = Atom(
+      name: '_PlayerPanelController.splitPanelHeightFraction',
+      context: context);
+
+  @override
+  double get splitPanelHeightFraction {
+    _$splitPanelHeightFractionAtom.reportRead();
+    return super.splitPanelHeightFraction;
+  }
+
+  @override
+  set splitPanelHeightFraction(double value) {
+    _$splitPanelHeightFractionAtom
+        .reportWrite(value, super.splitPanelHeightFraction, () {
+      super.splitPanelHeightFraction = value;
+    });
+  }
+
   late final _$_PlayerPanelControllerActionController =
       ActionController(name: '_PlayerPanelController', context: context);
+
+  @override
+  void loadSplitPanelExtent() {
+    final _$actionInfo = _$_PlayerPanelControllerActionController.startAction(
+        name: '_PlayerPanelController.loadSplitPanelExtent');
+    try {
+      return super.loadSplitPanelExtent();
+    } finally {
+      _$_PlayerPanelControllerActionController.endAction(_$actionInfo);
+    }
+  }
+
+  @override
+  void setSplitPanelExtent(SplitAxis axis, double stored) {
+    final _$actionInfo = _$_PlayerPanelControllerActionController.startAction(
+        name: '_PlayerPanelController.setSplitPanelExtent');
+    try {
+      return super.setSplitPanelExtent(axis, stored);
+    } finally {
+      _$_PlayerPanelControllerActionController.endAction(_$actionInfo);
+    }
+  }
+
+  @override
+  void openSplitPanel([SplitPanelTab? tab]) {
+    final _$actionInfo = _$_PlayerPanelControllerActionController.startAction(
+        name: '_PlayerPanelController.openSplitPanel');
+    try {
+      return super.openSplitPanel(tab);
+    } finally {
+      _$_PlayerPanelControllerActionController.endAction(_$actionInfo);
+    }
+  }
+
+  @override
+  void closeSplitPanel() {
+    final _$actionInfo = _$_PlayerPanelControllerActionController.startAction(
+        name: '_PlayerPanelController.closeSplitPanel');
+    try {
+      return super.closeSplitPanel();
+    } finally {
+      _$_PlayerPanelControllerActionController.endAction(_$actionInfo);
+    }
+  }
+
+  @override
+  void toggleSplitPanel() {
+    final _$actionInfo = _$_PlayerPanelControllerActionController.startAction(
+        name: '_PlayerPanelController.toggleSplitPanel');
+    try {
+      return super.toggleSplitPanel();
+    } finally {
+      _$_PlayerPanelControllerActionController.endAction(_$actionInfo);
+    }
+  }
+
+  @override
+  void setSplitPanelTab(SplitPanelTab tab) {
+    final _$actionInfo = _$_PlayerPanelControllerActionController.startAction(
+        name: '_PlayerPanelController.setSplitPanelTab');
+    try {
+      return super.setSplitPanelTab(tab);
+    } finally {
+      _$_PlayerPanelControllerActionController.endAction(_$actionInfo);
+    }
+  }
+
+  @override
+  void openSplitPanelSubPage(SplitSubPage page) {
+    final _$actionInfo = _$_PlayerPanelControllerActionController.startAction(
+        name: '_PlayerPanelController.openSplitPanelSubPage');
+    try {
+      return super.openSplitPanelSubPage(page);
+    } finally {
+      _$_PlayerPanelControllerActionController.endAction(_$actionInfo);
+    }
+  }
+
+  @override
+  void closeSplitPanelSubPage() {
+    final _$actionInfo = _$_PlayerPanelControllerActionController.startAction(
+        name: '_PlayerPanelController.closeSplitPanelSubPage');
+    try {
+      return super.closeSplitPanelSubPage();
+    } finally {
+      _$_PlayerPanelControllerActionController.endAction(_$actionInfo);
+    }
+  }
 
   @override
   void reset() {
@@ -212,7 +382,12 @@ showVolume: ${showVolume},
 showPlaySpeed: ${showPlaySpeed},
 brightnessSeeking: ${brightnessSeeking},
 volumeSeeking: ${volumeSeeking},
-canHidePlayerPanel: ${canHidePlayerPanel}
+canHidePlayerPanel: ${canHidePlayerPanel},
+splitPanelVisible: ${splitPanelVisible},
+splitPanelTab: ${splitPanelTab},
+splitPanelSubPage: ${splitPanelSubPage},
+splitPanelWidth: ${splitPanelWidth},
+splitPanelHeightFraction: ${splitPanelHeightFraction}
     ''';
   }
 }

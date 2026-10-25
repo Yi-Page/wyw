@@ -83,8 +83,8 @@ class DescriptorPageRouteArgs {
       method: (data?['method'] as String?) ?? '',
       args: (data?['args'] as List?)?.cast<dynamic>() ?? const [],
       title: data?['title'] as String?,
-      actions: (data?['actions'] as List?)?.cast<Map<String, dynamic>>() ??
-          const [],
+      actions:
+          (data?['actions'] as List?)?.cast<Map<String, dynamic>>() ?? const [],
     );
   }
 }

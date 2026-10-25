@@ -24,7 +24,7 @@
 class ttdm8 extends PluginSource {
     name = '天天动漫'
     key = 'ttdm8'
-    version = '1.0.0'
+    version = '1.0.1'
     baseUrl = 'https://www.ttdm8.me'
 
     /// 分类名称 → /vod-show/ 首段数字 ID
@@ -556,7 +556,9 @@ class ttdm8 extends PluginSource {
                     style: 'text',
                     onTap: UI.Action({
                         method: 'play',
-                        args: [href, title + ' ' + text, cover],
+                        // title 只传作品名：集名由 sourceEpisodes[].name 承载，
+                        // 拼进 title 会污染播放器标题 / 历史 / 下载名。
+                        args: [href, title, cover],
                     }),
                 }))
                 sourceEpisodes.push({

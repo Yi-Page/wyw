@@ -1,0 +1,98 @@
+[
+  {
+    "name": "dushehub",
+    "enabled": false,
+    "displayName": "毒舌电影",
+    "categoryId": "video",
+    "homepage": "",
+    "description": "毒舌电影（dushehub.com）视频源 — 搜索 / 分类 / 详情 / 播放"
+  },
+  {
+    "name": "bmmdmm",
+    "enabled": false,
+    "displayName": "黑猫动漫",
+    "categoryId": "video",
+    "homepage": "",
+    "description": "黑猫动漫（bmmdmm.com）视频源（搜索 + 浏览 + 详情 + 播放）"
+  },
+  {
+    "name": "hanime",
+    "enabled": false,
+    "displayName": "Hanime1",
+    "categoryId": "video",
+    "homepage": "",
+    "description": "Hanime1.me 视频源（搜索 + 详情 + 播放，经 WebView 绕过反爬）"
+  },
+  {
+    "name": "jm",
+    "enabled": false,
+    "displayName": "禁漫天堂",
+    "categoryId": "manga",
+    "homepage": "",
+    "description": "禁漫天堂（JM）漫画源 — 搜索/详情/章节/阅读（含切片还原）"
+  },
+  {
+    "name": "ehentai",
+    "enabled": false,
+    "displayName": "E-Hentai",
+    "categoryId": "manga",
+    "homepage": "",
+    "description": "E-Hentai 漫画源 — 搜索/详情/阅读（图片经 API 分页获取）"
+  },
+  {
+    "name": "hot_manga",
+    "enabled": false,
+    "displayName": "热辣漫画",
+    "categoryId": "manga",
+    "homepage": "",
+    "description": "热辣漫画（manga2024）漫画源 — 搜索/详情/阅读/分类浏览"
+  },
+  {
+    "name": "baozi",
+    "enabled": false,
+    "displayName": "包子漫画",
+    "categoryId": "manga",
+    "homepage": "",
+    "description": "包子漫画（BaoziMH）漫画源 — 搜索/分类/详情/章节/阅读"
+  },
+  {
+    "name": "pixiv",
+    "enabled": false,
+    "displayName": "Pixiv",
+    "categoryId": "manga",
+    "homepage": "https://www.pixiv.net/",
+    "description": "Pixiv 插画/漫画/小说源 — 关键词搜索 / ID 直达 / 推荐与排行 / 参数化搜索 / 详情 / 阅读"
+  },
+  {
+    "name": "ttdm8",
+    "enabled": false,
+    "displayName": "天天动漫",
+    "categoryId": "video",
+    "homepage": "",
+    "description": "天天动漫（www.ttdm8.me）视频源 — 搜索 / 分类 / 详情 / 播放"
+  },
+  {
+    "name": "fc_008nnn",
+    "enabled": false,
+    "displayName": "风车动漫",
+    "categoryId": "video",
+    "homepage": "",
+    "description": "风车动漫（008nnn.com）视频源 — 搜索 / 分类 / 详情 / 播放"
+  },
+  {
+    "name": "girigirilove",
+    "enabled": false,
+    "displayName": "girigiri愛動漫",
+    "categoryId": "video",
+    "homepage": "",
+    "description": "girigiri愛動漫（ani.girigirilove.com）视频源 — 搜索 / 详情 / 播放（播放页 m3u8 交嗅探；含风控验证码处理）"
+  },
+  {
+    "name": "pornhub",
+    "enabled": false,
+    "displayName": "",
+    "categoryId": "video",
+    "homepage": "",
+    "description": "pornhub 视频源（搜索 + 外部浏览器播放）"
+  }
+]

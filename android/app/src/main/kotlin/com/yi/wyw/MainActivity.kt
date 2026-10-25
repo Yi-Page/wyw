@@ -13,6 +13,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.StatFs
+import android.provider.Settings
+import android.util.Log
 import android.util.Rational
 import androidx.annotation.NonNull
 import androidx.core.content.ContextCompat
@@ -28,6 +30,7 @@ class MainActivity : AudioServiceActivity() {
     private val CHANNEL = "com.yi.wyw/intent"
     private val STORAGE_CHANNEL = "com.yi.wyw/storage"
     private val PIP_CHANNEL = "com.yi.wyw/pip"
+    private val TAG = "MainActivity"
 
     private var intentChannel: MethodChannel? = null
     private var pipChannel: MethodChannel? = null
@@ -95,6 +98,16 @@ class MainActivity : AudioServiceActivity() {
                 "checkIfInMultiWindowMode" -> result.success(checkIfInMultiWindowMode())
                 "getAndroidSdkVersion" -> result.success(Build.VERSION.SDK_INT)
                 "isRunningOnX11" -> result.success(false)
+                "setOrientation" -> {
+                    val orientation = call.argument<Int>("orientation")
+                    if (orientation == null) {
+                        result.error("INVALID_ARGUMENT", "orientation required", null)
+                    } else {
+                        applyRequestedOrientation(orientation)
+                        result.success(null)
+                    }
+                }
+                "getOrientationState" -> result.success(orientationState())
                 "enterFullscreen" -> {
                     enterAndroidFullscreen()
                     result.success(null)
@@ -165,6 +178,42 @@ class MainActivity : AudioServiceActivity() {
         } else {
             false
         }
+    }
+
+    /// 应用统一接管屏幕方向：直接写 Activity 的 requestedOrientation。
+    ///
+    /// 为什么必须走原生：`SCREEN_ORIENTATION_FULL_SENSOR`(10) 与 `SENSOR_*` 系列在
+    /// WindowManager 里即使用户锁定了旋转也会启用方向传感器（AOSP
+    /// `DisplayRotation.needSensorRunning`），而 Flutter 的
+    /// `SystemChrome.setPreferredOrientations` 只能表达 `USER`/`FULL_USER` 系列——
+    /// 那些会尊重系统「自动旋转」开关，于是出现「按钮说可旋转、屏幕转不动」。
+    ///
+    /// 注意：targetSdk 36 起，大屏（最短边 >= 600dp）上系统会忽略应用的方向限制，
+    /// 这是平台行为；手机上仍然生效。
+    private fun applyRequestedOrientation(orientation: Int) {
+        try {
+            requestedOrientation = orientation
+        } catch (e: Exception) {
+            Log.e(TAG, "applyRequestedOrientation failed: $orientation", e)
+        }
+    }
+
+    /// 方向真实状态，供 Dart 侧把按钮状态与真实情况对齐。
+    private fun orientationState(): Map<String, Any> {
+        val autoRotateEnabled = try {
+            Settings.System.getInt(
+                contentResolver,
+                Settings.System.ACCELEROMETER_ROTATION,
+                0
+            ) != 0
+        } catch (e: Exception) {
+            // 读不到就按「开着」处理：只在提示文案上有差别，不影响方向本身。
+            true
+        }
+        return mapOf(
+            "requestedOrientation" to requestedOrientation,
+            "autoRotateEnabled" to autoRotateEnabled
+        )
     }
 
     private fun enterAndroidFullscreen() {

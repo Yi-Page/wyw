@@ -6,8 +6,10 @@ import 'package:media_kit/media_kit.dart';
 import 'package:flutter_modular/flutter_modular.dart';
 import 'package:wyw/services/player/external_playback_launcher.dart';
 import 'package:wyw/pages/player/controller/player_debug_controller.dart';
+import 'package:wyw/pages/player/controller/player_danmaku_controller.dart';
 import 'package:wyw/pages/player/controller/player_models.dart';
 import 'package:wyw/pages/player/controller/player_seek_controller.dart';
+import 'package:wyw/pages/player/controller/player_screenshot_controller.dart';
 import 'package:wyw/pages/player/controller/player_aspect_ratio.dart';
 import 'package:wyw/pages/player/controller/player_panel_controller.dart';
 import 'package:wyw/pages/player/controller/player_playback_controller.dart';
@@ -23,6 +25,8 @@ import 'package:wyw/utils/async_session.dart';
 import 'package:wyw/utils/device.dart';
 
 export 'package:wyw/pages/player/controller/player_models.dart';
+export 'package:wyw/pages/player/controller/player_danmaku_controller.dart'
+    show DanmakuTimeline, PlayerDanmakuController;
 
 class PlayerController implements Disposable {
   PlayerController(
@@ -37,6 +41,15 @@ class PlayerController implements Disposable {
   final PlayerPanelController panel = PlayerPanelController();
   final PlayerDebugController debug = PlayerDebugController();
 
+  /// 弹幕：画布 + 时间轴 + 数据。
+  ///
+  /// 与播放引擎完全解耦 —— 它只读播放位置，因此在线直链、本地代理、离线
+  /// 本地三种播放模式共用同一套逻辑，不需要各自适配。
+  final PlayerDanmakuController danmaku = PlayerDanmakuController();
+
+  /// 截图候选（Kazumi 的截图工作流：连续截图 → 挑选 → 批量保存）。
+  final PlayerScreenshotController screenshots = PlayerScreenshotController();
+
   late final PlayerPlaybackController playback = PlayerPlaybackController(
     shaderAssetService: shaderAssetService,
     debug: debug,
@@ -46,6 +59,8 @@ class PlayerController implements Disposable {
     playback: playback,
     pause: pause,
     play: play,
+    // 跳转后弹幕必须清屏，否则旧位置的弹幕会继续飘出来。
+    onBeforeSeek: danmaku.clearAndInvalidateScheduled,
   );
   late final ExternalPlaybackLauncher externalPlayback =
       ExternalPlaybackLauncher(
@@ -60,6 +75,9 @@ class PlayerController implements Disposable {
   Timer? hideVolumeUITimer;
   Timer? _volumeGestureSyncTimer;
   double? _pendingGestureVolume;
+
+  /// 「同步播放状态」里周期性对外同步（历史进度 + 日志）的上次时间。
+  DateTime? _lastPeriodicSyncAt;
 
   bool muted = false;
   double _preMuteVolume = 100;
@@ -261,6 +279,10 @@ class PlayerController implements Disposable {
     );
   }
 
+  Future<void> setVideoFilter(Map<String, double>? params) async {
+    await playback.setVideoFilterParams(params);
+  }
+
   Future<void> setPlaybackSpeed(double playerSpeed) async {
     await playback.setPlaybackSpeed(playerSpeed);
   }
@@ -273,13 +295,35 @@ class PlayerController implements Disposable {
 
   void syncPlaybackState() {
     playback.syncPlaybackState();
-    WywLogger().i(
+    // 周期性排查日志 10 秒一条。
+    //
+    // 上面那行 1 秒级的内存状态同步不能省：`currentPosition` 只有这一个定时器
+    // 在更新（`player.stream` 没订阅 position），进度条、时间标签和弹幕投喂都
+    // 读它——降到 10 秒会让画面 10 秒一跳、弹幕 10 秒一坨。
+    //
+    // 续播点落盘**不在这里**，见 [reportPlaybackProgress]（照 Kazumi 每秒写）。
+    final now = DateTime.now();
+    final lastSyncAt = _lastPeriodicSyncAt;
+    final due = lastSyncAt == null ||
+        now.difference(lastSyncAt) >= const Duration(seconds: 10);
+    if (!due) return;
+    _lastPeriodicSyncAt = now;
+
+    WywLogger().d(
         '${LogTag.player} 同步播放状态 positionMs=${playback.currentPosition.inMilliseconds} '
         'durationMs=${playback.duration.inMilliseconds}');
-    // v2 History：position/duration 变化时上报（reporter 内部 5 秒节流）
+  }
+
+  /// 落盘续播点。
+  ///
+  /// 照 Kazumi：由播放定时器**每秒**调用，门控（播放中 / 非加载）留在调用方，
+  /// 这里只负责把「原生播放位置 + 总时长」交给 [HistoryProgressReporter]。
+  /// 用 `playerPosition` 而不是 `currentPosition`，与 Kazumi 一致——后者是 1 秒
+  /// 同步的观测值，拖进度条时会先跳到目标值。
+  void reportPlaybackProgress() {
     HistoryProgressReporter().reportProgress(
-      positionMs: playback.currentPosition.inMilliseconds,
-      durationMs: playback.duration.inMilliseconds,
+      positionMs: playback.playerPosition.inMilliseconds,
+      durationMs: playback.playerDuration.inMilliseconds,
     );
   }
 
@@ -301,6 +345,8 @@ class PlayerController implements Disposable {
       return;
     }
     playback.playing = false;
+    // 弹幕是画布自绘动画，播放暂停时也要停下来，否则暂停期间弹幕仍在飘。
+    danmaku.pauseCanvas();
   }
 
   Future<void> play({bool enableSync = true}) async {
@@ -313,6 +359,7 @@ class PlayerController implements Disposable {
       return;
     }
     playback.playing = true;
+    danmaku.resumeCanvas();
   }
 
   @override
@@ -327,6 +374,9 @@ class PlayerController implements Disposable {
   /// method returns.
   void beginShutdown() {
     _initializations.close();
+    // 弹幕没有异步资源需要释放，同步摘掉画布引用并让排队的弹幕失效即可。
+    danmaku.dispose();
+    screenshots.dispose();
     if (_shutdownFuture != null) {
       return;
     }
@@ -378,10 +428,6 @@ class PlayerController implements Disposable {
     HistoryProgressReporter().clearSource();
     _initializations.cancel();
     await _releasePlaybackResources();
-  }
-
-  Future<Uint8List?> screenshot({String format = 'image/jpeg'}) async {
-    return await playback.screenshot(format: format);
   }
 
   Future<Uint8List?> screenshotPng() async {

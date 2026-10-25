@@ -1,14 +1,20 @@
 // ignore_for_file: library_private_types_in_public_api
 
 import 'dart:async';
-import 'package:flutter/widgets.dart' show Orientation;
 import 'package:flutter_modular/flutter_modular.dart';
+import 'package:wyw/bean/dialog/dialog.dart';
+import 'package:wyw/modules/download/download_module.dart';
+import 'package:wyw/modules/danmaku/danmaku_library_ref.dart';
 import 'package:wyw/pages/download/download_controller.dart';
 import 'package:wyw/pages/plugin/plugin_controller.dart';
+import 'package:wyw/services/download/playback_proxy_service.dart';
 import 'package:wyw/services/video_source/resolution_service.dart';
 import 'package:wyw/services/video_source/services.dart';
+import 'package:wyw/services/danmaku/danmaku_library_service.dart';
+import 'package:wyw/services/danmaku/danmaku_cache_service.dart';
 import 'package:mobx/mobx.dart';
-import 'package:wyw/services/history/history_progress_reporter.dart';
+import 'package:wyw/repositories/i_history_repository.dart';
+import 'package:wyw/services/history/video_progress_merge.dart';
 import 'package:wyw/services/logging/logger.dart';
 import 'package:wyw/services/logging/log_tags.dart';
 import 'package:wyw/services/storage/history_progress.dart';
@@ -50,6 +56,14 @@ abstract class _VideoPageController with Store {
   String videoCover = '';
   String sourceKey = '';
 
+  /// 作品级身份 code（进度记录 `sourceId` / 下载归属），由 `configure` 从
+  /// [VideoPageRouteArgs.historySourceId] 注入。
+  ///
+  /// **本页所有身份相关逻辑只读这一个字段**（进度回填、写回、下载查询、
+  /// 弹幕匹配），不得再由 `sourceKey`+`videoId` 现场拼接——历史上三处各自拼
+  /// 过，正是 key 漂移的来源。
+  String videoCode = '';
+
   /// 完整播放源列表（含每集已解析直链与独立进度）。
   List<VideoPlaySource> sources = const [];
 
@@ -79,6 +93,13 @@ abstract class _VideoPageController with Store {
   /// 播放方式（决策层产出；播放页只执行不再决策）。
   VideoPlayMode playMode = VideoPlayMode.online;
 
+  /// 整页沿用进入时选择的播放方式：true = 切换集数时继续使用（默认）；
+  /// false = 仅初始集生效，之后切集按「直接播放」处理（弹窗内开关）。
+  bool followPlayMode = true;
+
+  /// 是否已用过进入时选择的播放方式（仅 followPlayMode=false 时参与判定）。
+  bool _usedChosenMode = false;
+
   @observable
   bool loading = true;
 
@@ -87,9 +108,6 @@ abstract class _VideoPageController with Store {
 
   @observable
   bool isFullscreen = false;
-
-  @observable
-  bool isOrientationLocked = false;
 
   @observable
   bool isCommentsAscending = false;
@@ -102,8 +120,29 @@ abstract class _VideoPageController with Store {
   /// 统一解析服务（解析层）：resolve/page 型的插件解析与 WebView 嗅探。
   ResolutionService? _resolutionService;
 
+  /// 当前正在播放的这一集是否来自**本地文件**（离线播放）。
+  ///
+  /// 不表示整页离线：切集时在 [playEpisode] 开头复位，随后由 [playLocalFile]
+  /// 按需重新置真，因此只反映「当前集」，不会跨集残留——否则这一页只要
+  /// 播过一次本地文件（含"该集已下载完成"的回退播放），切回在线集后播放器
+  /// 顶栏的下载/合流入口仍会被误藏。
   @observable
   bool isOfflineMode = false;
+
+  /// 当前播放源列表是否**全是本地文件**——即"这个列表里只有已缓存项"。
+  ///
+  /// 这是选集面板 `isOffline` 需要的语义（照 Kazumi `_buildOfflineRoadList`
+  /// 只把已缓存集塞进 roads）。**不能直接用 [isOfflineMode]**：
+  ///   - 后者只要当前这一集命中已下载的本地文件就置真（单集回退到本地播放），
+  ///     而 sources 仍是全量剧集；
+  ///   - 而且整页存活期间不会复位，切到在线集之后仍为真；
+  /// 于是面板工具条会对一整季在线剧集错误显示「已缓存 · N 集」，同时因为
+  /// 离线态会抑制逐集标签，真正的逐集缓存状态反而看不到。
+  bool get isCachedOnlyPlayback =>
+      sources.isNotEmpty &&
+      sources.every((source) =>
+          source.episodes.isNotEmpty &&
+          source.episodes.every((e) => e.path.type == PlayPathType.local));
 
   final StreamController<String> _logStreamController =
       StreamController<String>.broadcast();
@@ -128,6 +167,7 @@ abstract class _VideoPageController with Store {
     videoTitle = args.title;
     videoCover = args.cover;
     sourceKey = args.sourceKey ?? '';
+    videoCode = args.historySourceId;
     sources = args.sources;
     currentSourceIndex = args.initialSource >= 0
         ? args.initialSource.clamp(0, sources.isEmpty ? 0 : sources.length - 1)
@@ -136,11 +176,16 @@ abstract class _VideoPageController with Store {
     onProgressChanged = args.onProgressChanged;
     playMode = args.playMode;
     allowProxyPlayback = args.allowProxyPlayback;
+    followPlayMode = args.followPlayMode;
+    _usedChosenMode = false;
     _resolvedUrls.clear();
     _positions.clear();
     _durations.clear();
     _lastPlayedAt.clear();
     resumeOffsetMs = 0;
+    // 弹幕库条目按作品持久化在进度记录里；换一部作品必须先清掉上一部的，
+    // 否则同一控制器实例复用时会显示上一部的库（"当前使用"卡片串台）。
+    danmakuLibrary = null;
     // 从历史记录回填各集观看进度（不覆盖插件最新剧集列表）
     _applyHistoryProgress();
   }
@@ -150,37 +195,25 @@ abstract class _VideoPageController with Store {
   ///
   /// 不回填则 sources 里各集 positionMs 都是 0，选集面板看不到历史进度、
   /// 也无法续播（插件进入 args 不带 offsetMs）。
+  ///
+  /// 结构/状态的合并（含线路名 + 集标识二级校验）统一走
+  /// [mergeVideoProgressState]，与入口编排层同源，避免两处口径漂移。
   void _applyHistoryProgress() {
-    final historySourceId = sourceKey.isEmpty ? videoId : '$sourceKey:$videoId';
-    final entry = HistoryProgressReporter()
-        .findEntry(type: HistoryType.video, sourceId: historySourceId);
+    if (videoCode.isEmpty) return;
+    final entry = inject<IHistoryRepository>()
+        .find(type: HistoryType.video, sourceId: videoCode);
     if (entry == null) return;
     final history = VideoPlaybackProgress.fromMap(entry.progress);
 
     // 1) 把历史每集进度合并进插件最新列表（只回填状态字段，不动 name/path）
-    final merged = <VideoPlaySource>[];
-    for (var s = 0; s < sources.length; s++) {
-      final src = sources[s];
-      final histSrc = s < history.sources.length ? history.sources[s] : null;
-      final eps = <VideoPlayEpisode>[];
-      for (var e = 0; e < src.episodes.length; e++) {
-        final ep = src.episodes[e];
-        final histEp = (histSrc != null && e < histSrc.episodes.length)
-            ? histSrc.episodes[e]
-            : null;
-        eps.add(ep.copyWith(
-          positionMs: histEp?.positionMs ?? ep.positionMs,
-          durationMs: histEp?.durationMs ?? ep.durationMs,
-          resolvedUrl: histEp?.resolvedUrl ?? ep.resolvedUrl,
-          lastPlayedAt: histEp?.lastPlayedAt ?? ep.lastPlayedAt,
-        ));
-      }
-      merged.add(VideoPlaySource(name: src.name, episodes: eps));
-    }
-    sources = merged;
+    sources = mergeVideoProgressState(skeleton: sources, history: history);
 
     // 2) 续播位置 = 当前集（args 指定的初始集）在历史中的 positionMs
     resumeOffsetMs = currentEpisode?.positionMs ?? 0;
+
+    // 3) 弹幕库条目：入场即"当前使用"的来源。分集映射刻意不存，所以这里只拿库，
+    //    要出弹幕仍需用户点一次分集（见 docs/danmaku-selection-plan.md §1）。
+    danmakuLibrary = history.danmaku;
   }
 
   /// 当前集（夹取到合法范围；无集返回 null）。
@@ -276,14 +309,24 @@ abstract class _VideoPageController with Store {
           VideoPlaySource(name: src.name, episodes: cleared);
     }
     final currentEp = sources[currentSourceIndex].episodes[currentEpisodeIndex];
+
+    // 整页沿用：进入时选择的方式对后续切集持续生效；不沿用则只对初始集生效，
+    // 之后切集按「直接播放」处理。
+    final useChosenMode = followPlayMode || !_usedChosenMode;
+    _usedChosenMode = true;
+    final effectiveMode = useChosenMode ? playMode : VideoPlayMode.online;
+
     WywLogger().i('${LogTag.player} 播放剧集 s=$currentSourceIndex '
         'e=$currentEpisodeIndex path=${currentEp.path.type.value} '
-        'mode=${playMode.name} name=${currentEp.name}');
+        'mode=${effectiveMode.name} name=${currentEp.name}');
 
     // 开启新一轮播放尝试：先清掉上一次的失败状态，保证解析失败后
     // 再点「重新解析」时界面能回到加载态（而不是停在旧错误页）。
     errorMessage = null;
     loading = true;
+    // 重算离线态：isOfflineMode 只反映「当前这一集是否本地文件播放」，
+    // 每次切集先复位，本地分支在 playLocalFile 里重新置真。
+    isOfflineMode = false;
 
     // 本地文件：直接本地播放
     if (ep.path.type == PlayPathType.local) {
@@ -295,8 +338,7 @@ abstract class _VideoPageController with Store {
     // 下载预检：该集已下载完成且本地文件存在 → 直接本地播放
     final downloadController = inject<DownloadController>();
     final localPath = downloadController.findLocalVideoPathByIdentity(
-      sourceKey: sourceKey,
-      videoId: videoId,
+      code: videoCode,
       sourceIndex: currentSourceIndex,
       episodeIndex: currentEpisodeIndex,
     );
@@ -310,14 +352,16 @@ abstract class _VideoPageController with Store {
     // 统一播放地址：缓存直链 >（合流）任务直链 > direct 型 url > 解析
     String playUrl;
     var playOffset = offset ?? 0;
+    // 合流的解析路径会先预创建任务（让"解析中"在下载页可见）；判型不支持时要
+    // 把它撤掉——用户并没有下这一集。
+    var preparedDownloadTask = false;
     if (currentEp.resolvedUrl.isNotEmpty) {
       // 已解析直链缓存：直接使用；失效时由用户经「重新解析」强制重走解析
       playUrl = currentEp.resolvedUrl;
-    } else if (playMode == VideoPlayMode.merge) {
+    } else if (effectiveMode == VideoPlayMode.merge) {
       // 合流：优先直用进行中任务的新鲜直链（免解析快路径）
       final taskEpisode = inject<DownloadController>().findEpisodeByIdentity(
-        sourceKey: sourceKey,
-        videoId: videoId,
+        code: videoCode,
         sourceIndex: currentSourceIndex,
         episodeIndex: currentEpisodeIndex,
       );
@@ -327,6 +371,7 @@ abstract class _VideoPageController with Store {
       } else {
         // 预创建解析中任务：解析也是下载生命周期的一部分，下载页立即可见
         await inject<DownloadController>().prepareStructuredEpisode(
+          code: videoCode,
           sourceKey: sourceKey,
           videoId: videoId,
           title: videoTitle,
@@ -336,13 +381,13 @@ abstract class _VideoPageController with Store {
           episodeName: currentEp.name,
           sourceName: src.name,
         );
+        preparedDownloadTask = true;
         final source = await _resolveMedia(currentEp.path, offset: playOffset);
         if (source == null) {
           // 失败/取消：_resolveMedia 内已置 errorMessage 并停止 loading
           //（取消保持静默，与页面关闭时的取消行为一致）
           await inject<DownloadController>().failPreparedEpisode(
-            sourceKey: sourceKey,
-            videoId: videoId,
+            code: videoCode,
             sourceIndex: currentSourceIndex,
             episodeIndex: currentEpisodeIndex,
             message: errorMessage ?? '解析播放地址失败',
@@ -371,9 +416,39 @@ abstract class _VideoPageController with Store {
       _resolvedUrls[_currentKey] = playUrl;
     }
 
+    // 合流只支持 HLS：整段媒体（mp4 直链等）没有分片，就没有「播放进度即下载
+    // 进度」这条两端共享的量，代理没法边下边播。判型不支持时**底部提示 + 降级
+    // 为直链直接播放**（不建下载任务、不挂代理），而不是挂上代理让播放器拿到一个
+    // 必然打不开的地址。判型只看内容不看 URL 后缀，理由见 classifyProxyMediaBytes。
+    //
+    // 非合流模式下恒为 true：它同时也是"允许挂代理"的开关，在线模式的静默代理
+    // 挂靠要靠它（与整页策略 allowProxyPlayback 是「与」的关系）。
+    var mergeAllowed = true;
+    if (effectiveMode == VideoPlayMode.merge) {
+      final kind = await PlaybackProxyService.instance.probeMediaKind(playUrl);
+      mergeAllowed = kind == ProxyMediaKind.hlsPlaylist;
+      if (!mergeAllowed) {
+        WywLogger().i('${LogTag.player} 合流源不支持（kind=${kind.name}），'
+            '降级为直链播放 url=$playUrl');
+        WywDialog.showToast(
+          message: kind == ProxyMediaKind.singleFile
+              ? '该资源是整段视频，不支持合流播放，已改为直接播放'
+              : '无法确认资源格式，合流播放不可用，已改为直接播放',
+        );
+        if (preparedDownloadTask) {
+          await inject<DownloadController>().discardPreparedEpisode(
+            code: videoCode,
+            sourceIndex: currentSourceIndex,
+            episodeIndex: currentEpisodeIndex,
+          );
+        }
+      }
+    }
+
     // 合流：确保下载任务存在（幂等，已完成跳过），随后经静默挂靠走本地代理
-    if (playMode == VideoPlayMode.merge) {
+    if (effectiveMode == VideoPlayMode.merge && mergeAllowed) {
       await inject<DownloadController>().downloadStructuredEpisode(
+        code: videoCode,
         sourceKey: sourceKey,
         videoId: videoId,
         title: videoTitle,
@@ -387,7 +462,7 @@ abstract class _VideoPageController with Store {
     }
 
     await _playDirectUrl(playUrl, playOffset,
-        playerController: playerController);
+        playerController: playerController, engageProxy: mergeAllowed);
   }
 
   /// 统一解析入口：确保解析服务实例与日志订阅就绪，把解析异常映射为页面状态。
@@ -444,6 +519,7 @@ abstract class _VideoPageController with Store {
         mediaUrl.isEmpty && ep.path.type != PlayPathType.direct;
     if (needsResolve) {
       await downloadController.prepareStructuredEpisode(
+        code: videoCode,
         sourceKey: sourceKey,
         videoId: videoId,
         title: videoTitle,
@@ -461,8 +537,7 @@ abstract class _VideoPageController with Store {
       if (source == null || source.url.isEmpty) {
         WywLogger().w('${LogTag.player} 下载前解析播放地址失败 s=$s e=$e');
         await downloadController.failPreparedEpisode(
-          sourceKey: sourceKey,
-          videoId: videoId,
+          code: videoCode,
           sourceIndex: s,
           episodeIndex: e,
           message: errorMessage ?? '解析播放地址失败',
@@ -482,6 +557,7 @@ abstract class _VideoPageController with Store {
     }
 
     await downloadController.downloadStructuredEpisode(
+      code: videoCode,
       sourceKey: sourceKey,
       videoId: videoId,
       title: videoTitle,
@@ -492,6 +568,91 @@ abstract class _VideoPageController with Store {
       sourceName: src.name,
       resolvedUrl: mediaUrl,
     );
+  }
+
+  // ===== 弹幕（选择与关联） =====
+
+  /// 这部作品选用的弹弹play 弹幕库条目信息（**作品级**；null = 还没选过）。
+  ///
+  /// 唯一事实源是**进度记录**（`VideoPlaybackProgress.danmaku`）：入场由
+  /// `_applyHistoryProgress` 读回，用户点选/刷新后由 [setDanmakuLibrary] 立即回写。
+  /// 刻意不在页面里再存一份：两份状态必然要靠"同步通道"对齐，那是 v1 踩过的坑。
+  ///
+  /// 注意它**只代表"用哪个库"**，不代表当前已经加载了弹幕——分集映射刻意不持久化，
+  /// 所以入场后还需要用户点一次分集（`playerController.danmaku.danmakuEpisodeId`
+  /// 才是"这一集已经出弹幕"的状态）。
+  DanmakuLibraryRef? danmakuLibrary;
+
+  /// 记下用户选用的弹幕库（点选与刷新都走这里），并**立即**写一次进度记录。
+  ///
+  /// 立即写而不是等下一个进度 tick：用户选完可能马上退出播放页，等 tick 可能等不到。
+  /// 没有进度记录可写时（下载入口反查不到记录 → `onProgressChanged` 为 null）
+  /// 只在本次会话里生效并记日志，不产生残缺记录（与入口编排层的约定一致）。
+  void setDanmakuLibrary(DanmakuLibraryRef? ref) {
+    danmakuLibrary = ref;
+    if (ref == null) return;
+    if (onProgressChanged == null) {
+      WywLogger().w(
+          '${LogTag.player} 本页无进度记录可写，弹幕库选择仅在本次会话生效 '
+          'code=$videoCode library=${ref.libraryTitle}');
+      return;
+    }
+    notifyProgressChanged();
+  }
+
+  /// 当前线路的分集总数，用于给候选作品算「集数吻合度」；未知返回 null。
+  int? get currentSourceEpisodeCount {
+    if (sources.isEmpty) return null;
+    final index = currentSourceIndex.clamp(0, sources.length - 1);
+    final count = sources[index].episodes.length;
+    return count > 0 ? count : null;
+  }
+
+  /// 离线播放时的弹幕加载：**只读下载目录里的本地缓存**。
+  ///
+  /// 那份 `danmaku.json` 是**下载产物**（内含写下去的 `episodeId`），不是匹配记忆：
+  /// 匹配记忆层已整体退场——作品级选择存在进度记录里
+  /// （`VideoPlaybackProgress.danmaku`），分集映射按
+  /// 产品口径刻意不持久化。因此在线播放不再"自动出弹幕"，离线播放也只认这份缓存；
+  /// 缺缓存就什么都不做，等用户联网后在「弹幕」tab 里点一次分集。
+  Future<void> _loadDanmakuForOfflinePlayback(
+    PlayerController playerController,
+    DownloadEpisode? episode,
+  ) async {
+    final danmaku = playerController.danmaku;
+    if (!DanmakuLibraryService.instance.isConfigured) {
+      // 未配置凭证是本地构建的预期状态：整块弹幕功能静默关闭。
+      danmaku.resetEpisodeSelection();
+      return;
+    }
+
+    final directory = episode?.downloadDirectory.trim() ?? '';
+    if (directory.isEmpty) {
+      danmaku.resetEpisodeSelection();
+      return;
+    }
+
+    try {
+      final cached = await DanmakuCacheService.instance.read(directory);
+      if (cached != null && cached.danmakus.isNotEmpty) {
+        danmaku.applyDanmakuLoad(
+          cached.danmakus,
+          episodeId: cached.episodeId,
+          libraryTitle: cached.libraryTitle,
+          // 读缓存命中就显示，不看那个没有 UI 的 `danmakuEnabledByDefault`
+          // （默认 false，会让离线播放永远黑屏弹幕）。
+          enableDanmaku: true,
+        );
+        WywLogger().i(
+            '${LogTag.player} 离线播放使用本地缓存的弹幕 episodeId=${cached.episodeId} '
+            '条数=${cached.danmakus.length}');
+        return;
+      }
+    } catch (error) {
+      WywLogger().w('${LogTag.player} 读离线弹幕缓存失败', error: error);
+    }
+
+    danmaku.resetEpisodeSelection();
   }
 
   /// 播放本地已下载的文件（离线模式），跳过 WebView 网络解析。
@@ -511,27 +672,35 @@ abstract class _VideoPageController with Store {
 
     // 历史 key 用下载剧集的稳定直链（networkM3u8Url），避免本地路径
     // 变化后历史无法反查到已完成下载；无对应记录时回退本地路径。
-    String historyKey = localPath;
+    // 这个反查结果同时给离线弹幕缓存用，所以只查一次。
+    DownloadEpisode? localEpisode;
     try {
-      final episode = inject<DownloadController>().findEpisodeByLocalPath(
+      localEpisode = inject<DownloadController>().findEpisodeByLocalPath(
         localPath,
       );
-      if (episode != null && episode.networkM3u8Url.isNotEmpty) {
-        historyKey = episode.networkM3u8Url;
-      }
     } catch (e) {
       WywLogger().d('${LogTag.player} 反查下载记录获取历史 key 失败（已忽略）', error: e);
     }
+    final historyKey = (localEpisode != null &&
+            localEpisode.networkM3u8Url.isNotEmpty)
+        ? localEpisode.networkM3u8Url
+        : localPath;
 
     final resumeOffset = offset > 0
         ? offset
         : _resolveResumeOffset(historyKey, 0, playerController);
 
+    // 广告过滤统一走同一个开关：离线播放也让引擎启用 hls_ad_filter。
+    // 本地 playlist.m3u8 保留了 #EXT-X-DISCONTINUITY（引擎侧过滤的启用条件），
+    // 因此这里与在线播放取同一个设置，不再写死关闭。
+    final bool forceAdBlocker =
+        GStorage.getSetting(SettingsKeys.forceAdBlocker);
+
     final params = PlaybackInitParams(
       videoUrl: localPath,
       offset: resumeOffset,
       httpHeaders: const {},
-      adBlockerEnabled: false,
+      adBlockerEnabled: forceAdBlocker,
       referer: '',
       videoTitle: videoTitle,
       videoCover: videoCover,
@@ -543,6 +712,9 @@ abstract class _VideoPageController with Store {
       if (!initialized) {
         errorMessage = '本地播放初始化失败';
         WywLogger().e('${LogTag.player} 本地播放初始化返回 false localPath=$localPath');
+      } else {
+        unawaited(
+            _loadDanmakuForOfflinePlayback(playerController, localEpisode));
       }
     } catch (e) {
       loading = false;
@@ -552,10 +724,15 @@ abstract class _VideoPageController with Store {
   }
 
   /// 直链直接播放（不经 WebView 嗅探）。
+  ///
+  /// [engageProxy] 是**本次播放**的开关：合流源判型不支持时传 false，一次性降级为
+  /// 直链播放，不影响后续切集是否再尝试合流。它与 [allowProxyPlayback]（整页策略，
+  /// 由入口决策层给出）是「与」的关系。
   Future<void> _playDirectUrl(
     String url,
     int offset, {
     required PlayerController playerController,
+    bool engageProxy = true,
   }) async {
     loading = true;
     errorMessage = null;
@@ -571,11 +748,10 @@ abstract class _VideoPageController with Store {
     Map<String, String> playbackHeaders = <String, String>{
       'user-agent': getRandomUA(),
     };
-    if (allowProxyPlayback) {
+    if (engageProxy && allowProxyPlayback) {
       final proxyUrl = await inject<DownloadController>()
           .maybeStartProxyForPlaybackByIdentity(
-        sourceKey: sourceKey,
-        videoId: videoId,
+        code: videoCode,
         sourceIndex: currentSourceIndex,
         episodeIndex: currentEpisodeIndex,
         resolvedUrl: url,
@@ -604,6 +780,11 @@ abstract class _VideoPageController with Store {
       if (!initialized) {
         errorMessage = '视频初始化失败';
         WywLogger().e('${LogTag.player} 直链播放初始化返回 false url=$playbackUrl');
+      } else {
+        // 不再"自动出弹幕"：分集映射刻意不持久化，作品级选择（用哪个库）由
+        // 「弹幕」tab 里的"当前使用"卡片显示，用户点一次分集才加载。
+        // 但**必须复位**，否则上一集的弹幕会留在画布上继续跑。
+        playerController.danmaku.resetEpisodeSelection();
       }
     } catch (e) {
       loading = false;
@@ -616,73 +797,13 @@ abstract class _VideoPageController with Store {
   String get proxyRecordKey =>
       '${sourceKey.isEmpty ? 'wyw' : sourceKey}_${videoId.hashCode}';
 
-  /// 历史 key：有结构化 videoId/sourceKey 时用结构化 id，否则回退直链。
-  String _stableHistoryKey(String url) {
-    if (videoId.isNotEmpty) {
-      return (sourceKey.isEmpty) ? videoId : '$sourceKey:$videoId';
-    }
-    return url;
-  }
+  /// 历史 key：结构化身份（code）优先，缺省回退直链。
+  String _stableHistoryKey(String url) => videoCode.isNotEmpty ? videoCode : url;
 
-  /// 切换到「播放即下载」代理播放：不改动 loading 状态，
-  /// 用当前播放位置续播（代理 URL 由 DownloadController 提供）。
-  Future<void> switchToProxyPlayback(
-    String proxyUrl, {
-    required PlayerController playerController,
-  }) async {
-    final currentMs = playerController.playback.currentPosition.inMilliseconds;
-    WywLogger().i('${LogTag.player} 切换代理播放 offsetMs=$currentMs url=$proxyUrl');
-
-    final bool forceAdBlocker =
-        GStorage.getSetting(SettingsKeys.forceAdBlocker);
-
-    final params = PlaybackInitParams(
-      videoUrl: proxyUrl,
-      offset: currentMs > 0 ? currentMs : 0,
-      httpHeaders: const {}, // 代理地址无需源站 UA
-      adBlockerEnabled: forceAdBlocker,
-      referer: '',
-      videoTitle: videoTitle,
-      videoCover: videoCover,
-      historySourceId:
-          resolvedVideoUrl.isNotEmpty ? resolvedVideoUrl : videoUrl,
-    );
-
-    try {
-      final initialized = await playerController.init(params);
-      if (!initialized) {
-        errorMessage = '切换到本地代理播放失败';
-        WywLogger().e('${LogTag.player} 代理播放初始化返回 false url=$proxyUrl');
-      }
-    } catch (e) {
-      errorMessage = '切换代理播放失败：$e';
-      WywLogger().e('${LogTag.player} 切换代理播放失败 url=$proxyUrl', error: e);
-    }
-  }
-
-  /// 在当前播放已经得到最终直链后，尝试把现有下载任务切换为代理播放。
-  Future<bool> startProxyForCurrentPlayback({
-    required PlayerController playerController,
-  }) async {
-    if (isOfflineMode || resolvedVideoUrl.isEmpty) {
-      return false;
-    }
-    allowProxyPlayback = true;
-    final proxyUrl =
-        await inject<DownloadController>().maybeStartProxyForPlaybackByIdentity(
-      sourceKey: sourceKey,
-      videoId: videoId,
-      sourceIndex: currentSourceIndex,
-      episodeIndex: currentEpisodeIndex,
-      resolvedUrl: resolvedVideoUrl,
-    );
-    if (proxyUrl == null || proxyUrl.isEmpty) return false;
-    await switchToProxyPlayback(
-      proxyUrl,
-      playerController: playerController,
-    );
-    return true;
-  }
+  // 曾经还有 switchToProxyPlayback / startProxyForCurrentPlayback 两个"播放中
+  // 改挂代理"的入口（顶栏那个下载/合流按钮退场后就再没有调用者了）。它们已删除：
+  // 挂代理前必须先判型（合流只支持 HLS），留一个能绕过判型的入口等于把这个坑
+  // 重新埋回去。
 
   void cancelVideoSourceResolution() {
     _playbackSessions.cancel();
@@ -734,6 +855,8 @@ abstract class _VideoPageController with Store {
           ? resolvedVideoUrl
           : (currentEpisode?.effectiveUrl ?? ''),
       lastWatchTime: DateTime.now(),
+      // 弹幕库条目跟着进度一起写：它是"这部作品我上次怎么播的"的一部分。
+      danmaku: danmakuLibrary,
     );
   }
 
@@ -749,11 +872,13 @@ abstract class _VideoPageController with Store {
   }
 
   // ===== 全屏 / 方向 =====
+  //
+  // 方向不在这里：播放页进入/退出时由 `ScreenOrientationService` 占用/释放
+  // （owner = player），页面内的方向按钮直接改服务里的当前策略。
 
   void enterFullScreen() {
-    isOrientationLocked = false;
     isFullscreen = true;
-    DisplayModeService.enterFullScreen(lockOrientation: false);
+    DisplayModeService.enterFullScreen();
   }
 
   void exitFullScreen() {
@@ -782,25 +907,15 @@ abstract class _VideoPageController with Store {
     }
   }
 
-  void toggleOrientationLock(Orientation orientation) {
-    if (isOrientationLocked) {
-      isOrientationLocked = false;
-      unawaited(DisplayModeService.unlockScreenRotation());
-    } else {
-      isOrientationLocked = true;
-      unawaited(DisplayModeService.lockOrientation(orientation));
-    }
-  }
-
   /// 按直链/历史 key 查历史续播 offset；末段（>= 75%，片尾段）视为已看完，从头开始。
   ///
   /// 显式 [sourceOffset] > 0 时（结构化进入带该集续播位置）直接采用，不再查历史。
   int _resolveResumeOffset(String key, int sourceOffset, PlayerController pc) {
     if (sourceOffset > 0) return sourceOffset;
-    final reporter = HistoryProgressReporter();
     WywLogger().i('${LogTag.player} 查询续播偏移 key=$key '
         'sourceOffset=$sourceOffset');
-    final entry = reporter.findEntry(type: HistoryType.video, sourceId: key);
+    final entry =
+        inject<IHistoryRepository>().find(type: HistoryType.video, sourceId: key);
     if (entry == null) {
       WywLogger().i('${LogTag.player} 无历史记录，使用 sourceOffset=$sourceOffset');
       return sourceOffset;

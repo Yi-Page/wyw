@@ -56,6 +56,17 @@ mixin _$HistoryController on _HistoryController, Store {
   }
 
   @override
+  void refresh() {
+    final _$actionInfo = _$_HistoryControllerActionController.startAction(
+        name: '_HistoryController.refresh');
+    try {
+      return super.refresh();
+    } finally {
+      _$_HistoryControllerActionController.endAction(_$actionInfo);
+    }
+  }
+
+  @override
   HistoryEntry? findBySource(HistoryType type, String sourceId) {
     final _$actionInfo = _$_HistoryControllerActionController.startAction(
         name: '_HistoryController.findBySource');

@@ -1,14 +1,14 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter_qjs/flutter_qjs.dart';
 import 'package:wyw/bean/dialog/dialog_helper.dart';
 import 'package:wyw/pages/download/download_controller.dart';
-import 'package:wyw/pages/video/play_intent.dart';
-import 'package:wyw/pages/video/video_route_args.dart';
-import 'package:wyw/services/history/history_progress_reporter.dart';
+import 'package:wyw/pages/video/video_entry_launcher.dart';
 import 'package:wyw/services/storage/video_play_model.dart';
+import 'package:wyw/repositories/collect_repository.dart';
 import 'package:wyw/repositories/history_repository.dart';
-import 'package:wyw/repositories/plugin_history_repository.dart';
 import 'package:wyw/services/storage/history_progress.dart';
 import 'package:wyw/services/storage/history_type.dart';
 import 'package:wyw/services/storage/storage.dart';
@@ -60,8 +60,7 @@ class _InitPageState extends State<InitPage> {
 
   SearchPageController get searchController => inject<SearchPageController>();
 
-  PluginHistoryRepository get historyRepository =>
-      inject<PluginHistoryRepository>();
+  CollectRepository get collectRepository => inject<CollectRepository>();
 
   ScriptEngine? _jsEngine;
 
@@ -168,9 +167,16 @@ class _InitPageState extends State<InitPage> {
 
   void _loadHistory() async {
     try {
-      historyRepository.init();
+      collectRepository.init();
     } catch (e, s) {
-      WywLogger().e('${LogTag.app} 播放历史加载失败', error: e, stackTrace: s);
+      WywLogger().e('${LogTag.app} 收藏条目加载失败', error: e, stackTrace: s);
+    }
+    // 旧 JSON 后端 → Hive 的一次性迁移（幂等；失败保留旧文件，下次重试）
+    try {
+      unawaited(collectRepository.migrateFromJsonIfNeeded());
+    } catch (e, s) {
+      WywLogger().e('${LogTag.app} 收藏条目迁移失败（JSON → Hive）',
+          error: e, stackTrace: s);
     }
     // v2 → v3 进度历史就地迁移（幂等，仅视频旧条目）
     try {
@@ -194,6 +200,149 @@ class _InitPageState extends State<InitPage> {
       WywDialog.showToast(message: msg);
     };
 
+    // 通用对话框（venera 的 UI.showDialog）：每个按钮点击后回调对应的 JS 函数
+    JSEngineCommonApi.onShowDialog = ({
+      required String title,
+      required String content,
+      List<Map<String, dynamic>> actions = const [],
+    }) {
+      unawaited(WywDialog.show<void>(
+        clickMaskDismiss: false,
+        builder: (ctx) => AlertDialog(
+          title: title.isEmpty ? null : Text(title),
+          content: content.isEmpty
+              ? null
+              : SingleChildScrollView(child: Text(content)),
+          actions: [
+            for (final a in actions)
+              TextButton(
+                onPressed: () {
+                  Navigator.of(ctx).pop();
+                  _invokeJsCallback(a['callback']);
+                },
+                child: Text(a['text']?.toString() ?? '确定'),
+              ),
+          ],
+        ),
+      ));
+    };
+
+    // 输入框（venera 的 UI.showInputDialog）：返回输入文本，取消返回 null。
+    // 支持插件传入图片（URL 字符串或 ArrayBuffer 字节，如 ccc 的验证码）。
+    JSEngineCommonApi.onShowInputDialog = ({
+      required String title,
+      Object? image,
+      Object? validator,
+    }) async {
+      // 用 TextFormField 而不是外部 TextEditingController：`showDialog` 的 future
+      // 在**路由 pop 时**就完成了，但退场动画期间 TextField 仍挂在树上；此时
+      // dispose 外部 controller 会让动画中的 TextField 摸到已销毁的 ChangeNotifier
+      // （TextEditingController was used after being disposed）。
+      // TextFormField 自带内部 controller，随 widget 一起销毁，没有这个时序问题。
+      var text = '';
+      String? error;
+      return WywDialog.show<String>(
+        clickMaskDismiss: false,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setLocal) {
+            void confirm() {
+              final msg = _runJsValidator(validator, text);
+              if (msg != null) {
+                setLocal(() => error = msg);
+                return;
+              }
+              Navigator.of(ctx).pop(text);
+            }
+
+            return AlertDialog(
+              title: title.isEmpty ? null : Text(title),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _buildDialogImage(image),
+                  TextFormField(
+                    initialValue: '',
+                    autofocus: true,
+                    cursorColor: Theme.of(ctx).colorScheme.primary,
+                    onChanged: (v) => text = v,
+                    decoration: InputDecoration(
+                      hintText: '请输入',
+                      errorText: error,
+                    ),
+                    onFieldSubmitted: (_) => confirm(),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(),
+                  child: const Text('取消'),
+                ),
+                TextButton(onPressed: confirm, child: const Text('确定')),
+              ],
+            );
+          },
+        ),
+      );
+    };
+
+    // 选择框（venera 的 UI.showSelectDialog）：返回选中下标，取消返回 null
+    JSEngineCommonApi.onShowSelectDialog = ({
+      required String title,
+      required List<String> options,
+      int? initialIndex,
+    }) async {
+      if (options.isEmpty) return null;
+      return WywDialog.show<int>(
+        builder: (ctx) => SimpleDialog(
+          title: title.isEmpty ? null : Text(title),
+          children: [
+            for (var i = 0; i < options.length; i++)
+              SimpleDialogOption(
+                onPressed: () => Navigator.of(ctx).pop(i),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Text(options[i]),
+                ),
+              ),
+          ],
+        ),
+      );
+    };
+
+    // 加载中对话框（venera 的 UI.showLoading / cancelLoading）
+    JSEngineCommonApi.onShowLoading = ({Object? onCancel}) {
+      final nav = rootNavigatorKey.currentState;
+      if (nav == null) return -1;
+      final id = ++_loadingDialogSeq;
+      _loadingDialogs[id] = nav;
+      unawaited(showDialog<void>(
+        context: nav.context,
+        barrierDismissible: false,
+        builder: (_) => const PopScope(
+          canPop: false,
+          child: AlertDialog(
+            content: Row(
+              children: [
+                SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                SizedBox(width: 16),
+                Expanded(child: Text('加载中…')),
+              ],
+            ),
+          ),
+        ),
+      ));
+      return id;
+    };
+    JSEngineCommonApi.onCancelLoading = (int id) {
+      final nav = _loadingDialogs.remove(id);
+      if (nav != null && nav.canPop()) nav.pop();
+    };
+
     // 外部浏览器打开链接（宿主弹确认框，确认后才打开）
     JSEngineCommonApi.onOpenExternalBrowser = (String url) {
       unawaited(openExternalBrowserWithConfirm(url));
@@ -212,87 +361,21 @@ class _InitPageState extends State<InitPage> {
       if (ctx == null) return;
       final effectiveTitle =
           (title != null && title.isNotEmpty) ? title : videoUrl;
-      // 结构化进入：插件一次传入完整播放源列表（含集数/直链/resolve 描述）
+      // 结构化进入：插件一次传入完整播放源列表（含集数/直链/resolve 描述）。
+      // 参数处理（历史回填 / 决策弹窗 / 构造路由参数）统一交给编排层，
+      // 本处只做 JS 边界的数据整形。
       if (sources == null || sources.isEmpty) return;
-      final playSources =
-          sources.map((m) => VideoPlaySource.fromMap(m)).toList();
       final effectiveVideoId =
           (videoId != null && videoId.isNotEmpty) ? videoId : videoUrl;
-      final effectiveSourceKey = sourceKey ?? '';
-
-      // 定位初始集（决策对象）
-      final initialSourceIndex =
-          (initialSource ?? 0).clamp(0, playSources.length - 1);
-      final initialEpisodes = playSources[initialSourceIndex].episodes;
-      final initialEpisodeIndex =
-          (initialEpisode ?? 0).clamp(0, initialEpisodes.length - 1);
-      final initialEpisode0 = initialEpisodes[initialEpisodeIndex];
-
-      // ① 历史合并：取该集缓存直链与续播位置（决策输入；页内 configure 会再全量合并）
-      var cachedUrl = initialEpisode0.resolvedUrl;
-      var offsetMs = 0;
-      final historySourceId = effectiveSourceKey.isEmpty
-          ? effectiveVideoId
-          : '$effectiveSourceKey:$effectiveVideoId';
-      final historyEntry = HistoryProgressReporter()
-          .findEntry(type: HistoryType.video, sourceId: historySourceId);
-      if (historyEntry != null) {
-        final history = historyEntry.parseProgress();
-        if (history is VideoPlaybackProgress) {
-          final histSrc = initialSourceIndex < history.sources.length
-              ? history.sources[initialSourceIndex]
-              : null;
-          final histEp =
-              (histSrc != null && initialEpisodeIndex < histSrc.episodes.length)
-                  ? histSrc.episodes[initialEpisodeIndex]
-                  : null;
-          cachedUrl = histEp?.resolvedUrl ?? cachedUrl;
-          offsetMs = histEp?.positionMs ?? 0;
-        }
-      }
-
-      // ② 决策（弹窗 / 「只下载」副作用都在决策层内完成）
-      final decision = await PlayIntentDecider.decide(
-        context: ctx,
-        path: initialEpisode0.path,
-        sourceKey: effectiveSourceKey,
-        videoId: effectiveVideoId,
-        sourceIndex: initialSourceIndex,
-        episodeIndex: initialEpisodeIndex,
-        episodeName: initialEpisode0.name,
-        sourceName: playSources[initialSourceIndex].name,
-        videoTitle: effectiveTitle,
-        videoCover: cover ?? '',
-        cachedUrl: cachedUrl,
-      );
-      if (decision == null || !ctx.mounted) return; // 暂不播放 / 只下载已完成
-
-      // ③ 进播放页（携带决策产物：播放方式 + 静默代理开关）
-      final args = VideoPageRouteArgs(
+      await VideoEntryLauncher(ctx).openFromPlugin(
+        pluginName: sourceKey ?? '',
         videoId: effectiveVideoId,
         title: effectiveTitle,
         cover: cover ?? '',
-        sourceKey: sourceKey,
-        sources: playSources,
-        initialSource: initialSourceIndex,
-        initialEpisode: initialEpisodeIndex,
-        offsetMs: offsetMs,
-        playMode: decision.mode,
-        allowProxyPlayback: decision.allowProxyPlayback,
-        onProgressChanged: (progress) {
-          // 播放页回吐整部剧进度 → 写进度历史（sourceId 统一规则）
-          _historyRepo.setProgress(
-            type: HistoryType.video,
-            sourceId: (sourceKey == null || sourceKey.isEmpty)
-                ? effectiveVideoId
-                : '$sourceKey:$effectiveVideoId',
-            title: effectiveTitle,
-            cover: cover ?? '',
-            progress: progress.toMap(),
-          );
-        },
+        sources: sources.map((m) => VideoPlaySource.fromMap(m)).toList(),
+        initialSource: initialSource ?? 0,
+        initialEpisode: initialEpisode ?? 0,
       );
-      ctx.pushNamed('/video/', arguments: args);
     };
 
     // 跳转 WebView 页面
@@ -425,7 +508,12 @@ class _InitPageState extends State<InitPage> {
       String eid,
     ) async {
       final plugin = pluginsController.getPlugin(sourceKey);
-      if (plugin == null || !plugin.isRegistered) return {};
+      if (plugin == null || !plugin.isLoaded) return {};
+      // 基类不再给能力方法留空实现，所以未实现的插件直接跳过（省一次必然失败的
+      // invoke + 一条用不到的告警日志）；实现的才真调。
+      if (!await pluginsController.hasMethod(sourceKey, 'getImageLoadingConfig')) {
+        return {};
+      }
       try {
         final raw = await plugin.invoke('getImageLoadingConfig', [
           imageKey,
@@ -449,6 +537,67 @@ class _InitPageState extends State<InitPage> {
         arguments: DescriptorPageRouteArgs.fromRawMap(args),
       );
     };
+  }
+
+  /// 加载中对话框的 id 序号与「id → NavigatorState」映射（供 cancelLoading 关闭）。
+  int _loadingDialogSeq = 0;
+  final Map<int, NavigatorState> _loadingDialogs = {};
+
+  /// 调用 JS 传过来的回调函数（对话框按钮点击）。
+  ///
+  /// JS 函数跨到 Dart 侧是 [JSInvokable]；调用失败不应影响宿主（仅记日志）。
+  void _invokeJsCallback(Object? callback) {
+    if (callback == null) return;
+    try {
+      if (callback is JSInvokable) {
+        callback.invoke(const []);
+      } else if (callback is Function) {
+        callback();
+      }
+    } catch (e, s) {
+      WywLogger().w('${LogTag.js} 调用 JS 对话框回调失败', error: e, stackTrace: s);
+    }
+  }
+
+  /// 调用插件传入的 JS 输入校验函数；返回非空字符串表示错误提示。
+  ///
+  /// 校验函数不可调用时放行 —— 不因宿主实现差异阻断用户输入。
+  String? _runJsValidator(Object? validator, String text) {
+    if (validator == null) return null;
+    try {
+      final r = validator is JSInvokable ? validator.invoke([text]) : null;
+      if (r is String && r.isNotEmpty) return r;
+    } catch (e, s) {
+      WywLogger()
+          .d('${LogTag.js} 调用 JS 输入校验函数失败（已忽略）', error: e, stackTrace: s);
+    }
+    return null;
+  }
+
+  /// 对话框内的图片：支持 URL 字符串或字节（ArrayBuffer → Uint8List）。
+  /// 无法识别或加载失败时返回空 widget（不阻断输入）。
+  Widget _buildDialogImage(Object? image) {
+    if (image is String && image.isNotEmpty) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: Image.network(
+          image,
+          height: 80,
+          errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+        ),
+      );
+    }
+    if (image is Uint8List && image.isNotEmpty) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: Image.memory(
+          image,
+          height: 80,
+          errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+        ),
+      );
+    }
+    return const SizedBox.shrink();
   }
 
   /// 把 JS 传来的章节描述转成 [ComicReaderChapter]。
@@ -498,7 +647,7 @@ class _InitPageState extends State<InitPage> {
     List<dynamic> args,
   ) async {
     final plugin = pluginsController.getPlugin(pluginName);
-    if (plugin == null || !plugin.isRegistered) {
+    if (plugin == null || !plugin.isLoaded) {
       throw '插件 $pluginName 未注册';
     }
     final raw = await plugin.invoke(method, args);
@@ -511,7 +660,7 @@ class _InitPageState extends State<InitPage> {
   /// 从插件浏览历史预取漫画封面（供进度历史卡片展示）。
   Future<void> _prefetchComicCover(String sourceKey, String comicId) async {
     try {
-      final entry = await historyRepository.find(
+      final entry = await collectRepository.find(
         pluginName: sourceKey,
         id: comicId,
       );
@@ -531,7 +680,7 @@ class _InitPageState extends State<InitPage> {
     List<dynamic> args,
   ) async {
     final plugin = pluginsController.getPlugin(pluginName);
-    if (plugin == null || !plugin.isRegistered) {
+    if (plugin == null || !plugin.isLoaded) {
       throw '插件 $pluginName 未注册';
     }
     final raw = await plugin.invoke(method, args);

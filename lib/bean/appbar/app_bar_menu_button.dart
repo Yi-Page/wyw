@@ -66,6 +66,11 @@ class WywAppBarMenuButton extends StatelessWidget {
       route: '/history/',
     ),
     AppBarMenuEntry(
+      label: '收藏',
+      leadingIcon: Icons.favorite_rounded,
+      route: '/collect/',
+    ),
+    AppBarMenuEntry(
       label: '离线下载',
       leadingIcon: Icons.download_rounded,
       route: '/settings/download/',
@@ -108,9 +113,7 @@ class WywAppBarMenuButton extends StatelessWidget {
   }
 
   void _push(BuildContext context, AppBarMenuEntry entry) {
-    Navigator.of(context, rootNavigator: true)
-        .context
-        .pushNamed(entry.route);
+    Navigator.of(context, rootNavigator: true).context.pushNamed(entry.route);
   }
 
   /// 出栈循环（一次 `popUntil` 表达）：

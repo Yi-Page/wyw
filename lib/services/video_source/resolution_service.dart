@@ -92,7 +92,7 @@ class ResolutionService {
           'resolve 缺少 plugin/method plugin=$pluginName method=$method');
     }
     final plugin = _pluginController.getPlugin(pluginName);
-    if (plugin == null || !plugin.isRegistered) {
+    if (plugin == null || !plugin.isLoaded) {
       throw VideoSourceNotFoundException('插件未注册 plugin=$pluginName');
     }
     try {

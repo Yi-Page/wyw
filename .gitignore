@@ -40,6 +40,15 @@ app.*.symbols
 # Obfuscation related
 app.*.map.json
 
+# 构建期注入的凭证（弹弹play AppId/Secret 等）：一律不入库
+# 用法：flutter build windows --release --dart-define-from-file=danmaku-credentials.env
+danmaku-credentials.env
+danmaku-credentials.json
+
+# 弹弹play 接口文档与实测响应留档（第三方 API 原始内容，本地查证用）
+# 单测 fixture 是手写 JSON（字段取值抄自这里的实测响应），不读这些文件
+/.danmaku-swagger/
+
 # Android Studio will place build artifacts here
 /android/app/debug
 /android/app/profile
@@ -49,3 +58,10 @@ app.*.map.json
 /.claude/
 /.tmp_refetch.js
 /.tmp_show_probe.js
+
+# media_kit libmpv 预编译包本地缓存：GitHub 直连不通时手工放入，
+# flutter clean 后可从这里恢复到 build/windows/x64/ 再构建，不入库
+#/.mpv-cache/
+
+# venera 上游插件原版镜像：可用 node tools/sync_venera_configs.js 重新拉取，不入库
+/tools/venera-configs/

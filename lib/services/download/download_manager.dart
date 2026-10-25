@@ -6,7 +6,6 @@ import 'package:wyw/modules/download/download_module.dart';
 import 'package:wyw/request/clients/download_http_client.dart';
 import 'package:wyw/request/core/network_exception.dart';
 import 'package:wyw/utils/m3u8_parser.dart';
-import 'package:wyw/utils/m3u8_ad_filter.dart';
 import 'package:wyw/utils/format.dart' as fmt;
 import 'package:wyw/utils/file_system.dart';
 import 'package:wyw/utils/segment_file_coordinator.dart';
@@ -232,10 +231,9 @@ class DownloadManager implements IDownloadManager {
     return getDefaultDownloadDirectory();
   }
 
-  String _getEpisodeDir(String downloadBase, int mediaId, String pluginName,
-      int episodeNumber) {
-    return path.join(
-        downloadBase, '${mediaId}_$pluginName', '$episodeNumber');
+  String _getEpisodeDir(
+      String downloadBase, int mediaId, String pluginName, int episodeNumber) {
+    return path.join(downloadBase, '${mediaId}_$pluginName', '$episodeNumber');
   }
 
   /// Resolves the episode directory (kept from a previous attempt if any),
@@ -541,12 +539,9 @@ class DownloadManager implements IDownloadManager {
         return;
       }
 
-      final finalTargetDuration = adBlockerEnabled
-          ? M3u8AdFilter.calculateTargetDuration(segments)
-          : targetDuration;
       final localM3u8 = M3u8Parser.buildLocalM3u8(
         segments,
-        targetDuration: finalTargetDuration,
+        targetDuration: targetDuration,
         keyUriToLocal: keyUriToLocal,
       );
       final m3u8Path = path.join(episodeDir, 'playlist.m3u8');
@@ -599,8 +594,9 @@ class DownloadManager implements IDownloadManager {
     }
   }
 
-  /// 解析 m3u8 内容为最终待下载分片（含 master 展开、嵌套展开、广告过滤）。
+  /// 解析 m3u8 内容为最终待下载分片（含 master 展开、嵌套展开）。
   ///
+  /// 广告过滤不在这里做：统一交给播放引擎（ffmpeg 的 hls_ad_filter）。
   /// 返回 `(segments, targetDuration)`；直播流或无分片时已把 [episode] 置为
   /// 失败并 notify，返回 null，调用方应直接结束该集下载。
   Future<(List<M3u8Segment>, double)?> _resolveMediaSegments({
@@ -652,11 +648,14 @@ class DownloadManager implements IDownloadManager {
       return null;
     }
 
-    List<M3u8Segment> segments = resolvedPlaylist.segments;
+    // 广告过滤统一交给播放引擎（ffmpeg 的 hls_ad_filter）：下载端不再自行
+    // 判定/剔除分片，列表与分片顺序保持原样，最终写入本地 playlist.m3u8 时
+    // 会按原样写回 #EXT-X-DISCONTINUITY（引擎侧过滤的启用条件）。
     if (adBlockerEnabled) {
-      segments = M3u8AdFilter.filterAds(segments);
+      WywLogger().i('${LogTag.download} 广告过滤已统一交由播放引擎处理 '
+          '(hls_ad_filter)，下载端不再剔除分片 episode=${episode.episodeNumber}');
     }
-    return (segments, resolvedPlaylist.targetDuration);
+    return (resolvedPlaylist.segments, resolvedPlaylist.targetDuration);
   }
 
   /// 并发下载未完成的分片，返回 `(sessionBytes, failedCount, cancelled)`。

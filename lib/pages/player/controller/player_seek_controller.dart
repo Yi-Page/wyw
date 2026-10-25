@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:wyw/pages/player/controller/player_playback_controller.dart';
 
 class _InteractiveSeekSession {
@@ -13,13 +14,21 @@ class PlayerSeekController {
     required PlayerPlaybackController playback,
     required Future<void> Function({bool enableSync}) pause,
     required Future<void> Function({bool enableSync}) play,
+    VoidCallback? onBeforeSeek,
   })  : _playback = playback,
         _pause = pause,
-        _play = play;
+        _play = play,
+        _onBeforeSeek = onBeforeSeek;
 
   final PlayerPlaybackController _playback;
   final Future<void> Function({bool enableSync}) _pause;
   final Future<void> Function({bool enableSync}) _play;
+
+  /// 跳转真正落地前的回调（用于清理弹幕等"绑定在时间轴上"的叠加层）。
+  ///
+  /// 放在这里而不是各个调用点，是因为跳转入口很多（进度条、按键、手势预览
+  /// 提交），漏掉任何一处都会让弹幕在跳转后串场。
+  final VoidCallback? _onBeforeSeek;
 
   Future<void> _seekTail = Future<void>.value();
   _InteractiveSeekSession? _interactiveSession;
@@ -36,6 +45,9 @@ class PlayerSeekController {
     }
 
     final normalizedTarget = _normalize(target);
+    if (normalizedTarget != _playback.currentPosition) {
+      _onBeforeSeek?.call();
+    }
     _playback.currentPosition = normalizedTarget;
 
     final operation = _seekTail.then((_) async {

@@ -1,8 +1,8 @@
 import 'package:flutter_modular/flutter_modular.dart';
 import 'package:wyw/js/base_js_engine.dart';
 import 'package:wyw/js/js_extends/js_bridge.dart';
+import 'package:wyw/repositories/collect_repository.dart';
 import 'package:wyw/repositories/history_repository.dart';
-import 'package:wyw/repositories/plugin_history_repository.dart';
 import 'package:wyw/services/history/history_progress_reporter.dart';
 import 'package:wyw/services/storage/storage.dart';
 
@@ -37,9 +37,9 @@ class ProductionScriptEngine extends BaseJsEngine {
       box: GStorage.histories,
     );
     HistoryProgressReporter().configure(() => repo);
-    // 插件浏览历史（JSON 后端）
-    final pluginRepo = inject<PluginHistoryRepository>();
-    JSEngineCommonApi.pluginHistoryRepository = pluginRepo;
+    // 收藏条目（= 插件浏览足迹 + 收藏状态，Hive 后端）
+    final collectRepo = inject<CollectRepository>();
+    JSEngineCommonApi.collectRepository = collectRepo;
     // 初始化插件注册表
     evaluate('globalThis.__plugins__ = globalThis.__plugins__ || {};',
         name: '<plugins-init>');

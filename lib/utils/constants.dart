@@ -9,6 +9,20 @@ class StyleString {
   static BorderRadius mdRadius = BorderRadius.circular(10);
   static const Radius imgRadius = Radius.circular(12);
   static const double aspectRatio = 16 / 10;
+
+  /// 控件圆角（规范 B3 的 radiusXs）：输入框、下拉选择器等小控件统一走 8。
+  ///
+  /// 改造前输入框圆角在 8 / 10 / 无边框（M3 默认下划线）三种形态间混用，
+  /// 这里是收敛后的单一来源。
+  static const double radiusXs = 8;
+
+  /// [radiusXs] 对应的圆角对象（输入框与下拉选择器共用，保证两者同款）。
+  static const BorderRadius controlBorderRadius =
+      BorderRadius.all(Radius.circular(radiusXs));
+
+  /// 输入框 / 下拉选择器的内容内边距（统一密集高度口径）。
+  static const EdgeInsets fieldContentPadding =
+      EdgeInsets.symmetric(vertical: 12, horizontal: 12);
 }
 
 const String customAppFontFamily = 'MI_Sans_Regular';
@@ -199,6 +213,8 @@ final Map<String, List<String>> defaultShortcuts = const {
   'speed3': ['3'],
   'speedup': ['X'],
   'speeddown': ['Z'],
+  // 分屏面板开合（Esc 关面板见 player_item 的 handleShortcutDown）。
+  'togglesplitpanel': ['T'],
 };
 
 // 键位别名
@@ -234,4 +250,5 @@ final Map<String, String> shortcutsChineseName = {
   'speed3': '倍速：3x',
   'speedup': '倍速加',
   'speeddown': '倍速减',
+  'togglesplitpanel': '面板开合',
 };

@@ -243,11 +243,16 @@ class hot_manga extends PluginSource {
         "同志": "yaoi",
     }
 
+    /// 上游 explore（singlePageWithMultiPart）的 5 个板块 —— wyw 没有探索页类型，
+    /// 回收成浏览页的「首页」分组，否则这些入口会丢失。
+    static exploreCategories = ['推荐漫画', '每周免费漫画排行', '每周付费漫画排行', '付费漫画更新', '免费漫画更新']
+
     /// 分类结构（venera 的 category）。
     getCategory() {
         return {
             title: '热辣漫画',
             parts: [
+                { name: '首页', categories: hot_manga.exploreCategories },
                 { name: '免费漫画排行', categories: ['排行'] },
                 { name: '免费漫画主题', categories: Object.keys(hot_manga.category_param_dict) },
                 { name: '主页', categories: Object.keys(hot_manga.homepage_param_dict) },
@@ -257,6 +262,8 @@ class hot_manga extends PluginSource {
 
     /// 分类筛选选项（venera 的 optionLoader 对应）
     getCategoryOptions(category) {
+        // 首页板块无需筛选框
+        if (hot_manga.exploreCategories.indexOf(category) >= 0) return null
         let sortOptions = [
             { value: '*popular', text: '热度高' },
             { value: 'popular', text: '热度低' },
@@ -292,8 +299,29 @@ class hot_manga extends PluginSource {
         return null
     }
 
+    /// 首页 5 个板块（上游 explore 的 load 逻辑；接口一次返回全部板块）。
+    async _fetchHomeSections() {
+        const data = await this._getJson(`${this.apiUrl}/api/v3/h5/homeIndex`)
+        const r = (data && data['results']) || {}
+        const pick = (key) => (((r[key] || {})['list']) || [])
+        const map = (arr) => arr.map((c) => this._comicCard(this._parseComic(c)))
+        return {
+            '推荐漫画': map(pick('recComics')),
+            '每周免费漫画排行': map(pick('rankWeeklyFreeComics')),
+            '每周付费漫画排行': map(pick('rankWeeklyChargeComics')),
+            '付费漫画更新': map(pick('updateWeeklyChargeComics')),
+            '免费漫画更新': map(pick('updateWeeklyFreeComics')),
+        }
+    }
+
     /// 请求分类列表并解析（venera 的 categoryComics.load 逻辑）
     async _fetchCategoryComics(category, page = 1, options = []) {
+        // 首页板块：走上游 explore 的 homeIndex 接口（单页，5 个板块一次返回）
+        if (hot_manga.exploreCategories.indexOf(category) >= 0) {
+            if (page > 1) return { comics: [], maxPage: 1 }
+            const sections = await this._fetchHomeSections()
+            return { comics: (sections && sections[category]) || [], maxPage: 1 }
+        }
         let category_url
         if (category === '排行') {
             let region = (options && options[0]) || '-'
@@ -415,6 +443,33 @@ class hot_manga extends PluginSource {
                 child: UI.Row({ crossAxisAlignment: 'start', children: headerChildren }),
             })
         )
+
+        // 标签 / 作者点击（上游 comic.onClickTag 的等价实现，缺口 G11）
+        // wyw 无 onClickTag 机制 → 渲染成可点击按钮；点击后由 searchTag 打开结果页。
+        if (tags.length > 0 || authors.length > 0) {
+            const tagButtons = []
+            for (const a of authors) {
+                tagButtons.push(UI.Button({
+                    label: '作者: ' + a,
+                    style: 'text',
+                    onTap: UI.Action({ method: 'searchTag', args: ['作者', a] }),
+                }))
+            }
+            for (const t of tags.slice(0, 30)) {
+                tagButtons.push(UI.Button({
+                    label: String(t),
+                    style: 'text',
+                    onTap: UI.Action({ method: 'searchTag', args: ['标签', String(t)] }),
+                }))
+            }
+            items.push(
+                UI.Card({
+                    padding: 12,
+                    shapeRadius: 8,
+                    child: UI.Wrap({ spacing: 6, runSpacing: 6, children: tagButtons }),
+                })
+            )
+        }
 
         // 简介
         if (description) {
@@ -557,6 +612,40 @@ class hot_manga extends PluginSource {
     }
 
     // ============ 浏览历史回放 ============
+
+    // —— 标签 / 作者点击（上游 comic.onClickTag 的等价实现，缺口 G11）——
+
+    /// 点击标签/作者 → 打开结果页。
+    ///
+    /// 上游语义：
+    ///   onClickTag('标签', tag) → {action:'category', keyword:tag, param:null}
+    ///   onClickTag('作者', tag) → {action:'search', keyword:'作者:'+tag}
+    ///
+    /// ⚠️ `UI.Action` 的返回值会被框架丢弃（`lib/utils/plugin_action.dart` 只
+    /// `await plugin.invoke(...)`），所以这里不能直接返回卡片列表 —— 必须打开新页面。
+    searchTag(namespace, tag) {
+        const ns = String(namespace || '')
+        const t = String(tag || '')
+        if (!t) {
+            Dialog.showToast('标签为空')
+            return
+        }
+        Navigator.navigateToDescriptor('hot_manga', {
+            method: 'loadTagResult',
+            args: [ns, t],
+            title: (ns === '作者' ? '作者: ' : '') + t,
+        })
+    }
+
+    /// 标签/作者结果页内容（供 [searchTag] 打开的结果页渲染）。
+    async loadTagResult(namespace, tag) {
+        const t = String(tag || '')
+        if (!t) return []
+        // 作者走 "作者:" 前缀（上游 search 里有该分支，按 path_word 精确检索）
+        const keyword = String(namespace || '') === '作者' ? '作者:' + t : t
+        // 用 this['search'] 避免 checker 把 this.search 误判为 venera 对象式接口
+        return await this['search'](keyword, 1)
+    }
 
     async onOpenBrowseEntry(entry) {
         if (!entry || !entry.kv || !entry.kv.id) {

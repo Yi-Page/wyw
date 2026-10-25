@@ -9,23 +9,35 @@
 //   getCategory / getCategoryOptions / loadCategory / loadCategoryPage — 分类浏览（分页容器）
 //   onOpenBrowseEntry(entry) → 浏览历史回放
 //
+// 站点现状（2026-10 实测）与 venera 版（v1.1.6）的差异：
+//   - 全站（cn.bzmgcn.com 及阅读域 cn.cnbzmg.com）前面多了一层 gatekeeper
+//     「正在验证浏览器」挑战：首次访问返回 403 + challenge_url，需要做
+//     SHA-256 工作量证明（difficultyBits=16），POST /__gatekeeper_challenge/verify
+//     换到 __Host-gk_clearance_* Cookie 后才能访问。venera 版没有处理这层，
+//     直接 Network.get 会 403 —— 这是本移植版「很多路径不能用」的根因。
+//     本版在插件内用纯 JS 实现 PoW（不依赖 WebView、不跨 JS→Dart 桥），
+//     通过后 Cookie 由框架 Cookie 罐自动保存，后续请求自动携带。
+//   - venera 的章节接口 appcn.baozimh.com/baozimhapp/... 已被 Cloudflare 完全
+//     挡住（Just a moment...），改用网页版章节页：
+//     /user/page_direct → 302 → cn.cnbzmg.com/comic/chapter/<id>/0_<slot>.html
+//   - 章节列表拆在 #chapter-items 与 #chapters_other_list 两个容器里（各约 24 /
+//     210 条），按 slot 升序拼接即为完整目录。
+//   - 多页章节标题带「(1/2)」，后续页 URL 为 0_<slot>_2.html。
+//
 // 说明：
-//   - 由 venera 的 baozi.js（v1.1.6）移植而来；venera 的登录/收藏在 wyw 中无对应支撑，已移除
-//   - Network.get 直接返回 body 字符串，非 2xx 由框架抛异常
-//   - 分类接口只返回 next 标记、无总页数：有下一页时 maxPage 取上限值，翻到空页由框架兜底
-//   - 章节以 chapter_slot 作为 epId（列表索引 ≠ 站点 slot），图片经
-//     /user/page_direct 重定向到站点章节页解析（域名/路径由站点决定）
-//   - 所有请求统一携带浏览器 UA（见 baseHeaders）：App 接口 appcn.baozimh.com
-//     会拒绝非浏览器 UA（Dart 默认 UA 被 403），Venera 原插件经 WebView 加载因此能通
+//   - Network.get 直接返回 body 字符串，非 2xx 由框架抛异常（带 status/body）；
+//     需要看状态码/响应头时用 Network.sendRequest。
+//   - 章节以 chapter_slot 作为 epId（列表索引 ≠ 站点 slot，必须从链接取），
+//     图片经 /user/page_direct 重定向到站点章节页解析（域名/路径由站点决定）。
+//   - 图片 CDN 支持 /w640 质量前缀（返回 webp，体积约为原图 1/4），
+//     由设置项「图片质量」控制；防盗链 Referer 用最近一次章节页检测到的阅读域。
 
 class baozi extends PluginSource {
     name = '包子漫画'
     key = 'baozi'
-    version = '1.1.8'
+    version = '1.2.0'
 
-    // 浏览器 UA：App 版章节接口（appcn.baozimh.com/baozimhapp）会拒绝非浏览器
-    // UA 的请求（Dio 默认 Dart/x 会被 403）；Venera 原插件经 WebView 带浏览器
-    // UA 加载，故此处补齐。所有请求统一携带，避免被反爬拦截。
+    // 浏览器 UA：站点对非浏览器 UA 会直接 403（Dio 默认 Dart/x 也会被拦）
     ua = 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
 
     settings = {
@@ -76,7 +88,7 @@ class baozi extends PluginSource {
         reader_domain: {
             title: '图片防盗链 Referer 域名',
             type: 'input',
-            default: 'dzmanga.com',
+            default: 'cn.cnbzmg.com',
         },
     }
 
@@ -109,6 +121,18 @@ class baozi extends PluginSource {
         '少年': 'shaonian',
         '其它': 'qita',
     }
+
+    // SHA-256 轮常量（FIPS 180-4）
+    static _K = new Int32Array([
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ])
 
     // 运行时缓存（getDetail 时填充，openReader / loadChapterImages 复用）
     _comicId = ''
@@ -147,6 +171,22 @@ class baozi extends PluginSource {
         return this.baseUrl + url
     }
 
+    /// 取 URL 的 origin（协议 + 域名），失败返回 baseUrl
+    _origin(u) {
+        const m = u && u.match(/^(https?:\/\/[^/]+)/)
+        return m ? m[1] : this.baseUrl
+    }
+
+    /// 以 base 为基准解析相对地址（不依赖 URL 全局对象）
+    _resolveUrl(loc, base) {
+        if (!loc) return base
+        if (loc.startsWith('http://') || loc.startsWith('https://')) return loc
+        if (loc.startsWith('//')) return 'https:' + loc
+        const origin = this._origin(base)
+        if (loc.startsWith('/')) return origin + loc
+        return origin + '/' + loc
+    }
+
     /// 取 URL 的 host（含端口），失败返回空串
     _extractHost(u) {
         const m = u && u.match(/^https?:\/\/([^/]+)/)
@@ -163,15 +203,248 @@ class baozi extends PluginSource {
         }
     }
 
+    // ============ 网络层：重定向 + gatekeeper 浏览器验证 ============
+
+    /// 单次请求（不抛异常，统一返回 {status, headers, body} 或抛结构化 Error）
+    async _send(method, url, headers, data, extra) {
+        const opt = Object.assign({ timeout: 30000 }, extra || {})
+        return await Network.sendRequest(method, url, headers, data, opt)
+    }
+
+    /// GET：自动跟随 302（手动跳转，便于逐域过 gatekeeper），并在 403 时尝试过验证。
+    async _get(url, headers) {
+        let current = url
+        for (let hop = 0; hop < 6; hop++) {
+            let res = null
+            try {
+                res = await this._send('GET', current, headers, null, { redirect: 'manual' })
+            } catch (e) {
+                // 框架把 3xx 也当非 2xx 抛出：从 e.headers.location 拿跳转目标
+                if (e && e.status >= 300 && e.status < 400) {
+                    const loc = e.headers && (e.headers.location || e.headers.Location)
+                    if (loc) {
+                        current = this._resolveUrl(loc, current)
+                        continue
+                    }
+                }
+                if (e && e.status === 403 && await this._passGatekeeper(current, headers, e)) {
+                    continue
+                }
+                throw e
+            }
+            // 部分实现（如命令行测试台）会把 3xx 当成功返回，这里同样跟随
+            if (res.status >= 300 && res.status < 400) {
+                const loc = res.headers && (res.headers.location || res.headers.Location)
+                if (loc) {
+                    current = this._resolveUrl(loc, current)
+                    continue
+                }
+            }
+            return {
+                status: res.status,
+                headers: res.headers,
+                body: res.body,
+                finalUrl: res.finalUrl || current,
+            }
+        }
+        throw '重定向次数过多: ' + url
+    }
+
+    /// 过 gatekeeper 的「正在验证浏览器」挑战（SHA-256 PoW）。
+    ///
+    /// 流程：403 响应（Accept: application/json 时是 JSON）里拿 challenge_url →
+    /// 打开挑战页拿 challengeId / ticket / verifyUrl / difficultyBits →
+    /// 本地算 nonce（SHA-256 前缀 = "gatekeeper-pow-v1:<id>:<nonce>"，前导零 ≥ bits）→
+    /// POST verify，服务端下发 __Host-gk_clearance_* Cookie（框架自动保存）→ 重试原请求。
+    async _passGatekeeper(url, headers, err) {
+        const origin = this._origin(url)
+        let challengeUrl = ''
+        try {
+            const j = JSON.parse((err && err.body) || '')
+            if (j && j.challenge_url) challengeUrl = j.challenge_url
+        } catch (e) { /* 非 JSON：通常是 HTML 挑战页（框架截断到 2000 字），下面换 Accept 重取 */ }
+        if (!challengeUrl) {
+            try {
+                const res = await this._send(
+                    'GET', url,
+                    Object.assign({}, headers, { 'Accept': 'application/json' }),
+                    null, { redirect: 'manual' })
+                // 已经能正常返回（例如 Cookie 刚生效）→ 无需验证
+                if (res && res.status >= 200 && res.status < 300) return true
+            } catch (e2) {
+                try {
+                    const j = JSON.parse((e2 && e2.body) || '')
+                    if (j && j.challenge_url) challengeUrl = j.challenge_url
+                } catch (e3) { /* ignore */ }
+            }
+        }
+        if (!challengeUrl) return false
+
+        const startUrl = this._resolveUrl(challengeUrl, origin)
+        let start = null
+        try {
+            start = await this._send('GET', startUrl, headers, null, { timeout: 30000 })
+        } catch (e) {
+            return false
+        }
+        const html = (start && start.body) || ''
+        const pick = (re) => { const m = html.match(re); return m ? m[1] : '' }
+        const challengeId = pick(/challengeId:"([^"]+)"/)
+        const ticket = pick(/ticket:"([^"]+)"/)
+        const verifyUrl = pick(/verifyUrl:"([^"]+)"/)
+        const bits = parseInt(pick(/difficultyBits:(\d+)/) || '16', 10)
+        if (!challengeId || !ticket || !verifyUrl) return false
+
+        const nonce = this._powNonce(challengeId, bits)
+        if (!nonce) return false
+        const payload = JSON.stringify({
+            challenge_id: challengeId,
+            ticket: ticket,
+            nonce: nonce,
+        })
+        let vr = null
+        try {
+            vr = await this._send('POST', this._resolveUrl(verifyUrl, origin), {
+                'Content-Type': 'application/json',
+                'Accept': '*/*',
+                'Origin': origin,
+                'Referer': origin + '/',
+            }, payload, { timeout: 30000 })
+        } catch (e) {
+            return false
+        }
+        try {
+            const j = JSON.parse((vr && vr.body) || '{}')
+            return !!(j && j.status === 'passed')
+        } catch (e) {
+            return false
+        }
+    }
+
+    /// ASCII 字符串 → 字节数组（挑战前缀与 nonce 都是 ASCII，无需 TextEncoder）
+    _ascii(s) {
+        const out = new Uint8Array(s.length)
+        for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 0xff
+        return out
+    }
+
+    /// 前导零位数（按 SHA-256 摘要的大端字节序）
+    _leadingZeroBits(h) {
+        let n = 0
+        for (let i = 0; i < 8; i++) {
+            const x = h[i]
+            if (x === 0) { n += 32; continue }
+            for (let bit = 31; bit >= 0; bit--) {
+                if (((x >>> bit) & 1) === 0) n++
+                else return n
+            }
+        }
+        return n
+    }
+
+    /// SHA-256 压缩函数：处理 b[o..o+64) 一个块，更新状态 h（Int32Array(8)）
+    _sha256Block(h, b, o, w) {
+        const K = baozi._K
+        for (let i = 0; i < 16; i++) {
+            const j = o + i * 4
+            w[i] = (b[j] << 24) | (b[j + 1] << 16) | (b[j + 2] << 8) | b[j + 3]
+        }
+        for (let i = 16; i < 64; i++) {
+            const x = w[i - 15]
+            const y = w[i - 2]
+            const s0 = ((x >>> 7) | (x << 25)) ^ ((x >>> 18) | (x << 14)) ^ (x >>> 3)
+            const s1 = ((y >>> 17) | (y << 15)) ^ ((y >>> 19) | (y << 13)) ^ (y >>> 10)
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0
+        }
+        let a = h[0], bb = h[1], c = h[2], d = h[3]
+        let e = h[4], f = h[5], g = h[6], hh = h[7]
+        for (let i = 0; i < 64; i++) {
+            const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7))
+            const ch = (e & f) ^ (~e & g)
+            const t1 = (hh + S1 + ch + K[i] + w[i]) | 0
+            const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10))
+            const maj = (a & bb) ^ (a & c) ^ (bb & c)
+            const t2 = (S0 + maj) | 0
+            hh = g; g = f; f = e; e = (d + t1) | 0
+            d = c; c = bb; bb = a; a = (t1 + t2) | 0
+        }
+        h[0] = (h[0] + a) | 0
+        h[1] = (h[1] + bb) | 0
+        h[2] = (h[2] + c) | 0
+        h[3] = (h[3] + d) | 0
+        h[4] = (h[4] + e) | 0
+        h[5] = (h[5] + f) | 0
+        h[6] = (h[6] + g) | 0
+        h[7] = (h[7] + hh) | 0
+    }
+
+    /// 计算满足 difficultyBits 前导零的 nonce（十进制字符串），失败返回空串。
+    ///
+    /// 优化：挑战前缀固定 84 字节（"gatekeeper-pow-v1:" + 64 位 hex + ":"），
+    /// 先算出第一个 64 字节块的中间状态，之后每个 nonce 只需再压缩一个块。
+    _powNonce(challengeId, bits) {
+        const prefix = 'gatekeeper-pow-v1:' + challengeId + ':'
+        const pre = this._ascii(prefix)
+        const st = new Int32Array([
+            0x6a09e667 | 0, 0xbb67ae85 | 0, 0x3c6ef372 | 0, 0xa54ff53a | 0,
+            0x510e527f | 0, 0x9b05688c | 0, 0x1f83d9ab | 0, 0x5be0cd19 | 0,
+        ])
+        const w = new Int32Array(64)
+        let off = 0
+        while (off + 64 <= pre.length) {
+            this._sha256Block(st, pre, off, w)
+            off += 64
+        }
+        const tailLen = pre.length - off
+        const block = new Uint8Array(64)
+        const h = new Int32Array(8)
+        for (let n = 0; n < 3000000; n++) {
+            const nonce = String(n)
+            const total = pre.length + nonce.length
+            for (let i = 0; i < 64; i++) block[i] = 0
+            for (let i = 0; i < tailLen; i++) block[i] = pre[off + i]
+            let p = tailLen
+            for (let i = 0; i < nonce.length; i++) block[p++] = nonce.charCodeAt(i) & 0xff
+            block[p] = 0x80
+            const bitsLen = total * 8
+            block[63] = bitsLen & 0xff
+            block[62] = (bitsLen >>> 8) & 0xff
+            block[61] = (bitsLen >>> 16) & 0xff
+            block[60] = (bitsLen >>> 24) & 0xff
+            for (let i = 0; i < 8; i++) h[i] = st[i]
+            this._sha256Block(h, block, 0, w)
+            if (this._leadingZeroBits(h) >= bits) return nonce
+        }
+        return ''
+    }
+
+    // ============ 解析 ============
+
+    /// 从章节链接里取站点 chapter_slot（优先 chapter_slot=，其次 0_<slot>.html）
+    _extractSlot(href) {
+        if (!href) return null
+        let m = href.match(/chapter_slot=(\d+)/)
+        if (m) return m[1]
+        m = href.match(/\/(\d+)_(\d+)(?:_\d+)?\.html/)
+        if (m) return m[2]
+        return null
+    }
+
     /// 解析 HTML 列表中的漫画卡片（搜索页结构）
     parseComic(e) {
-        let url = e.querySelector('a').attributes['href']
-        let id = url.split('/').pop()
-        let title = e.querySelector('h3').text.trim()
-        let cover = e.querySelector('a > amp-img').attributes['src']
-        let tags = e.querySelectorAll('div.tabs > span').map((x) => x.text.trim())
+        const a = e.querySelector('a')
+        const url = (a && a.attributes['href']) || ''
+        const id = url.split('/').pop()
+        const h3 = e.querySelector('h3')
+        const title = h3 ? h3.text.trim() : ''
+        const img = e.querySelector('a > amp-img') || e.querySelector('amp-img')
+        const cover = img ? (img.attributes['src'] || '') : ''
+        let tags = []
+        try {
+            tags = e.querySelectorAll('div.tabs > span').map((x) => x.text.trim()).filter((x) => x)
+        } catch (err) { /* 结构变化时忽略标签 */ }
         let description = ''
-        let small = e.querySelector('small')
+        const small = e.querySelector('small')
         if (small) description = small.text.trim()
         return {
             id: id,
@@ -184,11 +457,14 @@ class baozi extends PluginSource {
 
     /// 解析 JSON 列表中的漫画（分类接口结构）
     parseJsonComic(e) {
+        const img = e.topic_img || ''
         return {
             id: e.comic_id,
             title: e.name,
             subTitle: e.author,
-            cover: 'https://static-tw.baozimh.com/cover/' + e.topic_img + '?w=285&h=375&q=100',
+            cover: img
+                ? 'https://static-tw.bzmgcn.com/cover/' + img + '?w=285&h=375&q=100'
+                : '',
             tags: e.type_names || [],
         }
     }
@@ -243,7 +519,7 @@ class baozi extends PluginSource {
         const url = this.baseUrl + '/search?q=' + encodeURIComponent(keyword)
         let html
         try {
-            html = await Network.get(url, this.baseHeaders)
+            html = (await this._get(url, this.baseHeaders)).body
         } catch (e) {
             Dialog.showToast('搜索请求失败: ' + e)
             console.error('搜索请求失败: ' + e)
@@ -255,6 +531,7 @@ class baozi extends PluginSource {
         for (const item of doc.querySelectorAll('div.comics-card')) {
             try {
                 const c = this.parseComic(item)
+                if (!c.id) continue
                 c.cover = this._absUrl(c.cover)
                 cards.push(this._comicCard(c))
             } catch (err) {
@@ -325,7 +602,7 @@ class baozi extends PluginSource {
             '&__amp_source_origin=' + encodeURIComponent(this.baseUrl)
         let html
         try {
-            html = await Network.get(url, this.baseHeaders)
+            html = (await this._get(url, this.baseHeaders)).body
         } catch (e) {
             Dialog.showToast('分类请求失败: ' + e)
             console.error('分类请求失败: ' + e)
@@ -379,7 +656,7 @@ class baozi extends PluginSource {
     async getDetail(id) {
         let html
         try {
-            html = await Network.get(this.baseUrl + '/comic/' + id, this.baseHeaders)
+            html = (await this._get(this.baseUrl + '/comic/' + id, this.baseHeaders)).body
         } catch (e) {
             Dialog.showToast('详情请求失败: ' + e)
             console.error('详情请求失败: ' + e)
@@ -390,7 +667,11 @@ class baozi extends PluginSource {
 
         // 标题
         let titleEl = doc.querySelector('h1.comics-detail__title')
-        let title = titleEl ? titleEl.text.trim() : String(id)
+        let title = titleEl ? titleEl.text.trim() : ''
+        if (!title) {
+            const t = html.match(/<title>([^<]*)<\/title>/)
+            title = t ? t[1].replace(/\s*-\s*包子漫画\s*$/, '').trim() : String(id)
+        }
 
         // 封面（多级兜底）
         let cover = ''
@@ -433,6 +714,7 @@ class baozi extends PluginSource {
             .replace(/年/g, '-')
             .replace(/月/g, '-')
             .replace(/日/g, '')
+            .replace(/\s*更新\s*/g, '')
 
         // 简介
         let description = ''
@@ -440,44 +722,37 @@ class baozi extends PluginSource {
         if (descEl) description = descEl.text.trim()
 
         // 章节：以 chapter_slot 作为 epId（列表索引 ≠ 站点 slot，必须从链接取），
-        // 并保存 page_direct 链接供 loadChapterImages 使用
+        // 并保存 page_direct 链接供 loadChapterImages 使用。
+        // 目录拆在两个容器：主列表（前 ~24 话）+ 隐藏的完整列表（其余），按顺序拼接。
         let chapters = []
-        let i = 0
-        // 从链接提取站点章节号：优先 chapter_slot=，其次直接章节页 0_<slot>.html
-        const extractSlot = (href) => {
-            if (!href) return null
-            let m = href.match(/chapter_slot=(\d+)/)
-            if (m) return m[1]
-            m = href.match(/\/(\d+)_(\d+)\.html/)
-            if (m) return m[2]
-            return null
-        }
-        const pickChapterBlock = (containerSel) => {
-            for (const a of doc.querySelectorAll(containerSel + ' > div.comics-chapters > a')) {
+        let seenSlots = new Set()
+        const pushBlock = (selector) => {
+            for (const a of doc.querySelectorAll(selector)) {
                 const href = a.getAttribute('href') || ''
+                const slot = this._extractSlot(href)
+                if (slot === null) continue
+                if (seenSlots.has(slot)) continue
+                seenSlots.add(slot)
                 const span = a.querySelector('div > span')
-                const title = span ? span.text.trim() : (a.text || '').trim()
-                const slot = extractSlot(href)
-                chapters.push({ id: slot !== null ? slot : String(i), title: title, url: href })
-                i++
+                const ctitle = span ? span.text.trim() : (a.text || '').trim()
+                chapters.push({ id: slot, title: ctitle || ('第' + slot + '话'), url: href })
             }
         }
-        pickChapterBlock('div#chapter-items')
-        pickChapterBlock('div#chapters_other_list')
-        if (i === 0) {
-            // 主/次列表均未匹配：将全部章节反转（站点最新在前）
+        pushBlock('div#chapter-items > div.comics-chapters > a')
+        pushBlock('div#chapters_other_list > div.comics-chapters > a')
+        if (chapters.length === 0) {
+            // 主/次列表均未匹配：取全部章节链接（站点最新在前，反转成升序）
             const anchors = doc.querySelectorAll('div.comics-chapters > a').reverse()
             for (const a of anchors) {
                 const href = a.getAttribute('href') || ''
+                const slot = this._extractSlot(href)
+                if (slot === null || seenSlots.has(slot)) continue
+                seenSlots.add(slot)
                 const span = a.querySelector('div > span')
-                const title = span ? span.text.trim() : (a.text || '').trim()
-                const slot = extractSlot(href)
-                chapters.push({ id: slot !== null ? slot : String(i), title: title, url: href })
-                i++
+                const ctitle = span ? span.text.trim() : (a.text || '').trim()
+                chapters.push({ id: slot, title: ctitle || ('第' + slot + '话'), url: href })
             }
         }
-        console.error('[baozi] getDetail chapters=' + chapters.length +
-            ' 前3=' + JSON.stringify(chapters.slice(0, 3)))
 
         // 相关推荐（旧版页面结构，可能为空，容错处理）
         let recommend = []
@@ -659,13 +934,13 @@ class baozi extends PluginSource {
 
     /// 章节图片（阅读器惰性加载）。
     ///
-    /// epId = chapter_slot。章节页经 /user/page_direct 重定向到站点章节页
-    /// （形如 cn.dzmanga.com/comic/chapter/<slug>/0_<slot>.html），
-    /// 域名/路径由站点决定，不能硬编码 appcn 接口。
+    /// epId = chapter_slot。章节页经 /user/page_direct 302 到站点章节页
+    /// （形如 https://cn.cnbzmg.com/comic/chapter/<slug>/0_<slot>.html），
+    /// 域名/路径由站点决定，不能硬编码。
     ///
     /// 分页：站点章节按页拆分，标题形如「第132话(1/3)」（(当前/总页数)，
     /// 单页章节无括号），URL 为 .../0_<slot>.html、.../0_<slot>_2.html、...
-    /// 因此先解析标题得到总页数，再从 canonical/next-chapter 拿到真实章节基址，
+    /// 因此先解析标题得到总页数，再从 canonical 拿到真实章节基址，
     /// 依次抓取每一页的图片并去重（相邻页存在重叠图片）。
     async loadChapterImages(comicId, epId) {
         // 优先用详情页保存的 page_direct 链接；缺失时按 comicId + slot 重建
@@ -677,20 +952,19 @@ class baozi extends PluginSource {
             pageDirect = this.baseUrl + '/user/page_direct?comic_id=' +
                 encodeURIComponent(comicId) + '&section_slot=0&chapter_slot=' + epId
         }
-        let html
+        let res
         try {
-            html = await Network.get(pageDirect, this.baseHeaders)
+            res = await this._get(pageDirect, this.baseHeaders)
         } catch (e) {
             throw '章节加载失败: ' + e
         }
+        let html = res.body || ''
         if (!html) throw '章节页面为空'
-        const doc = new HtmlDocument(html)
 
         // ---- 分页信息 ----
         // 总页数：标题「第132话(1/3)」→ 3；单页章节无 (N/M) → 1
         let totalPages = 1
-        const titleEl = doc.querySelector('title')
-        const titleText = titleEl ? titleEl.text.trim() : ''
+        const titleText = (html.match(/<title>([^<]*)<\/title>/) || ['', ''])[1]
         const tm = titleText.match(/\((\d+)\s*\/\s*(\d+)\)/)
         if (tm && parseInt(tm[2], 10) > 1) {
             totalPages = Math.min(parseInt(tm[2], 10), 99)
@@ -698,21 +972,25 @@ class baozi extends PluginSource {
         // 真实章节基址（page_direct 重定向后的页面）：
         // 1) canonical 形如 .../0_<slot>.html → 去扩展名做分页拼接
         // 2) 兜底：第 1 页的 #next-chapter 形如 .../0_<slot>_2.html → 去掉 _N.html
+        // 3) 再兜底：用重定向后的 finalUrl
         let baseNoExt = ''
-        const canonEl = doc.querySelector('link[rel="canonical"]')
-        if (canonEl) {
-            const href = canonEl.getAttribute('href') || ''
-            if (href) baseNoExt = this._absUrl(href).replace(/\.html$/, '')
+        const canonMatch = html.match(/<link[^>]*rel="canonical"[^>]*href="([^"]+)"/) ||
+            html.match(/<link[^>]*href="([^"]+)"[^>]*rel="canonical"/)
+        if (canonMatch) {
+            baseNoExt = this._absUrl(canonMatch[1]).replace(/\.html$/, '')
         }
         if (!baseNoExt) {
-            const nextA = doc.querySelector('#next-chapter')
-            const nextHref = nextA ? (nextA.getAttribute('href') || '') : ''
+            const nextA = html.match(/id="next-chapter"[^>]*href="([^"]+)"/)
+            const nextHref = nextA ? nextA[1] : ''
             const m = nextHref.match(/^(.*)_\d+\.html$/)
             if (m) baseNoExt = this._absUrl(m[1])
         }
-        // 动态记录真实 reader 域（站点域路由会变，如 dzmanga.com → www.baozimh.com），
+        if (!baseNoExt && res.finalUrl) {
+            baseNoExt = String(res.finalUrl).replace(/\.html$/, '')
+        }
+        // 动态记录真实 reader 域（站点域路由会变，如 dzmanga.com → cn.cnbzmg.com），
         // 供 getImageLoadingConfig 的防盗链 Referer 使用；未检测到则回退设置项。
-        const detectedHost = this._extractHost(baseNoExt)
+        const detectedHost = this._extractHost(baseNoExt || res.finalUrl || '')
         if (detectedHost) {
             this._readerHost = detectedHost
             console.log('[baozi] reader host 检测: ' + detectedHost)
@@ -742,24 +1020,18 @@ class baozi extends PluginSource {
                 }
             }
         }
-        parsePage(doc)
-        let fetchedPages = 1
-        // 诊断用：第 1 页用真实章节页地址（baseNoExt + .html），后续页为各自分页地址
-        const pageUrls = [baseNoExt ? baseNoExt + '.html' : pageDirect]
-        // 诊断：统计各选择器命中数，便于定位页面结构
-        let probes = ''
-        for (const sel of ['.chapter-img', '.comic-contain', '.comic-contain amp-img', 'amp-img', 'img']) {
-            probes += sel + '=' + doc.querySelectorAll(sel).length + ' '
-        }
-        doc.dispose()
+        const firstDoc = new HtmlDocument(html)
+        parsePage(firstDoc)
+        firstDoc.dispose()
 
         // ---- 依次抓取剩余分页：.../0_<slot>_N.html ----
+        let fetchedPages = 1
         if (totalPages > 1 && baseNoExt) {
             for (let p = 2; p <= totalPages; p++) {
                 const pageUrl = baseNoExt + '_' + p + '.html'
                 let ph
                 try {
-                    ph = await Network.get(pageUrl, this.baseHeaders)
+                    ph = (await this._get(pageUrl, this.baseHeaders)).body
                 } catch (e) {
                     console.error('[baozi] 分页请求失败 page=' + p + ' url=' + pageUrl + ' err=' + e)
                     continue
@@ -769,29 +1041,23 @@ class baozi extends PluginSource {
                 parsePage(pdoc)
                 pdoc.dispose()
                 fetchedPages++
-                pageUrls.push(pageUrl)
             }
         }
 
-        // 诊断：统计各选择器命中数，便于定位页面结构
-        console.error('[baozi] loadChapterImages url=' + pageDirect +
-            ' htmlLen=' + (html ? html.length : 0) +
-            ' title="' + titleText + '" totalPages=' + totalPages +
-            ' fetched=' + fetchedPages + ' pages=' + JSON.stringify(pageUrls) +
-            ' images=' + images.length + ' epId=' + epId + ' | ' + probes +
-            ' 前3=' + JSON.stringify(images.slice(0, 3)))
+        console.log('[baozi] loadChapterImages title="' + titleText + '" totalPages=' + totalPages +
+            ' fetched=' + fetchedPages + ' images=' + images.length + ' epId=' + epId)
         if (images.length === 0) {
-            throw '章节图片为空（详见日志：' + probes + '）'
+            throw '章节图片为空（epId=' + epId + '，标题=' + titleText + '）'
         }
         return images
     }
 
-    /// 图片加载配置（防盗链：CDN 校验 reader 域 Referer + 浏览器 UA，否则返回被拦截的修改图）。
+    /// 图片加载配置（防盗链：CDN 校验 Referer + 浏览器 UA，否则返回被拦截的修改图）。
     /// 参数与 venera 的 comic.onImageLoad 一致：(url, comicId, epId)
     getImageLoadingConfig(url, comicId, epId) {
-        let rd = this.loadSetting('reader_domain') || 'dzmanga.com'
+        let rd = this.loadSetting('reader_domain') || 'cn.cnbzmg.com'
         // 优先用最近一次章节页动态检测到的真实 reader 域（避免站点换域后防盗链失效）
-        const refHost = this._readerHost || (this.lang + '.' + rd)
+        const refHost = this._readerHost || rd
         return {
             headers: {
                 'User-Agent': this.ua,
@@ -801,13 +1067,19 @@ class baozi extends PluginSource {
         }
     }
 
-    /// 按设置的 cdn 域名改写图片地址（默认保持原样；不擅自插入质量参数，避免破坏 CDN URL）
+    /// 按设置改写图片地址：CDN 域名替换 + 质量前缀（/w640 → webp，体积约 1/4）。
     _rewriteImage(u) {
-        const setDomain = this.loadSetting('cdn_domains')
-        if (!setDomain) return u
-        const m = u.match(/^(https?:\/\/)?([^/\s:]+)(:\d+)?(\/.*)/)
+        if (!u) return u
+        const m = u.match(/^(https?:\/\/)([^/\s:]+)(:\d+)?(\/.*)$/)
         if (!m) return u
-        return m[1] + setDomain + (m[3] || '') + m[4]
+        let host = m[2]
+        const port = m[3] || ''
+        let path = m[4]
+        const setDomain = this.loadSetting('cdn_domains')
+        if (setDomain) host = setDomain
+        const quality = this.imageQuality
+        if (quality && path.indexOf(quality + '/') !== 0) path = quality + path
+        return m[1] + host + port + path
     }
 
     // ============ 浏览历史回放 ============

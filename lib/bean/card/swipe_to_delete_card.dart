@@ -11,6 +11,8 @@ class SwipeToDeleteCard extends StatelessWidget {
     required this.child,
     this.onTap,
     this.onDeleted,
+    this.borderRadius,
+    this.margin,
   });
 
   /// Dismissible 的唯一 key（各卡片用条目的稳定 id 构造）。
@@ -25,9 +27,23 @@ class SwipeToDeleteCard extends StatelessWidget {
   /// 左滑删除或点删除按钮时回调。
   final VoidCallback? onDeleted;
 
+  /// 卡片圆角（删除背景与 Card 共用）。默认 16。
+  ///
+  /// 分组列表里由列表按行位置传入：首行上圆角、末行下圆角，中间行小圆角，
+  /// 使同一日期分组视觉上并成一块。
+  final BorderRadius? borderRadius;
+
+  /// 卡片外边距（删除背景与 Card 共用）。默认 vertical 4 / horizontal 8。
+  ///
+  /// 分组列表把它压到 vertical 1（行间 2px 缝），让分组更紧凑。
+  final EdgeInsets? margin;
+
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final shape = borderRadius ?? BorderRadius.circular(16);
+    final inset =
+        margin ?? const EdgeInsets.symmetric(vertical: 4, horizontal: 8);
     return Dismissible(
       key: dismissKey,
       direction: DismissDirection.endToStart,
@@ -35,10 +51,10 @@ class SwipeToDeleteCard extends StatelessWidget {
       background: Container(
         alignment: Alignment.centerRight,
         padding: const EdgeInsets.only(right: 24),
-        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+        margin: inset,
         decoration: BoxDecoration(
           color: colorScheme.errorContainer,
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: shape,
         ),
         child: Icon(
           Icons.delete_outline,
@@ -47,10 +63,8 @@ class SwipeToDeleteCard extends StatelessWidget {
       ),
       child: Card(
         elevation: 0,
-        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-        ),
+        margin: inset,
+        shape: RoundedRectangleBorder(borderRadius: shape),
         clipBehavior: Clip.antiAlias,
         color: colorScheme.surfaceContainerLow,
         child: InkWell(

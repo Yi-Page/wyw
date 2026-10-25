@@ -57,22 +57,6 @@ mixin _$VideoPageController on _VideoPageController, Store {
     });
   }
 
-  late final _$isOrientationLockedAtom =
-      Atom(name: '_VideoPageController.isOrientationLocked', context: context);
-
-  @override
-  bool get isOrientationLocked {
-    _$isOrientationLockedAtom.reportRead();
-    return super.isOrientationLocked;
-  }
-
-  @override
-  set isOrientationLocked(bool value) {
-    _$isOrientationLockedAtom.reportWrite(value, super.isOrientationLocked, () {
-      super.isOrientationLocked = value;
-    });
-  }
-
   late final _$isCommentsAscendingAtom =
       Atom(name: '_VideoPageController.isCommentsAscending', context: context);
 
@@ -127,7 +111,6 @@ mixin _$VideoPageController on _VideoPageController, Store {
 loading: ${loading},
 errorMessage: ${errorMessage},
 isFullscreen: ${isFullscreen},
-isOrientationLocked: ${isOrientationLocked},
 isCommentsAscending: ${isCommentsAscending},
 isPip: ${isPip},
 isOfflineMode: ${isOfflineMode}

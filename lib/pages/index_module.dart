@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_modular/flutter_modular.dart';
 import 'package:wyw/bean/widget/image_preview.dart';
 import 'package:wyw/pages/browse/browse_module.dart';
+import 'package:wyw/pages/collect/collect_module.dart';
 import 'package:wyw/pages/history/history_module.dart';
 import 'package:wyw/pages/index_page.dart';
 import 'package:wyw/pages/init_page.dart';
@@ -74,12 +75,12 @@ final indexModule = createModule(
       )
       ..route(
         '/error',
-        child: (context, state) =>
-            const RouteErrorPage(message: '初始化失败'),
+        child: (context, state) => const RouteErrorPage(message: '初始化失败'),
       )
       ..module(tabModule)
       ..module(videoModule)
       ..module(historyModule)
+      ..module(collectModule)
       ..module(webviewModule)
       ..module(jsDevModule)
       ..module(descriptorModule)

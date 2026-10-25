@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>播放器分屏面板 · 界面示意</title>
+<style>
+  :root {
+    --bg: #141218;
+    --surface: #141218;
+    --sc-low: #1d1b20;
+    --sc-high: #2b2930;
+    --on-surface: #e6e0e9;
+    --on-var: #cac4d0;
+    --outline: #49454f;
+    --primary: #d0bcff;
+    --primary-c: #4f378b;
+    --on-primary-c: #eaddff;
+    --video: #0f0d13;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--on-surface); padding: 32px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+  }
+  h1 { font-size: 22px; margin-bottom: 6px; }
+  h2 { font-size: 15px; color: var(--primary); margin: 30px 0 12px; }
+  .note { color: var(--on-var); font-size: 13px; line-height: 1.8; margin-top: 10px; }
+  .note b { color: var(--on-surface); }
+
+  /* ── 页签条：照收藏页（胶囊指示器），高度压到 40 + 下方分隔线 ── */
+  .tabbar {
+    display: flex; align-items: center; gap: 2px; padding: 4px 4px 4px 16px;
+    border-bottom: 1px solid var(--outline);
+  }
+  .tab {
+    height: 40px; min-width: 56px; padding: 0 14px; border-radius: 20px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 500; color: var(--on-var); white-space: nowrap;
+  }
+  .tab.on { background: var(--primary-c); color: var(--on-primary-c); font-weight: 700; }
+  .close { margin-left: auto; width: 40px; height: 40px; border-radius: 20px;
+           display: flex; align-items: center; justify-content: center; color: var(--on-var); font-size: 16px; }
+
+  /* ── 设置卡片（SplitListGroup + SettingsSection） ── */
+  .section-title {
+    color: var(--primary); font-size: 13px; font-weight: 600;
+    padding: 12px 32px 8px;
+  }
+  .card {
+    background: var(--sc-low); border-radius: 16px;
+    margin: 0 16px 16px; overflow: hidden;
+  }
+  .row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 16px; min-height: 56px;
+    border-bottom: 1px solid var(--outline);
+  }
+  .row:last-child { border-bottom: none; }
+  .row .ic { width: 22px; text-align: center; color: var(--on-var); font-size: 15px; }
+  .row .label { flex: 1; font-size: 14px; }
+  .row .desc { display: block; font-size: 12px; color: var(--on-var); margin-top: 2px; }
+  .row .val { color: var(--on-var); font-size: 13px; }
+  .row .chev { color: var(--on-var); font-size: 14px; }
+  .switch { width: 40px; height: 22px; border-radius: 11px; background: var(--primary); position: relative; }
+  .switch::after { content: ""; position: absolute; right: 3px; top: 3px; width: 16px; height: 16px;
+                   border-radius: 50%; background: #381e72; }
+  .switch.off { background: var(--outline); }
+  .switch.off::after { left: 3px; right: auto; background: var(--on-var); }
+
+  /* ── 滑杆行（SettingsSliderTile） ── */
+  .slider-row { padding: 12px 16px 16px; border-bottom: 1px solid var(--outline); }
+  .slider-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  .chip {
+    background: var(--sc-high); color: var(--on-var); border-radius: 8px;
+    padding: 4px 10px; font-size: 12px; font-variant-numeric: tabular-nums;
+  }
+  .track { height: 4px; border-radius: 2px; background: var(--outline); position: relative; }
+  .track i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--primary); border-radius: 2px; }
+  .track b { position: absolute; top: -6px; width: 16px; height: 16px; border-radius: 50%; background: var(--primary); }
+
+  /* ── 分屏窗口 ── */
+  .win { border: 1px solid var(--outline); border-radius: 12px; overflow: hidden; background: var(--video); }
+  .win-main { display: flex; height: 560px; }
+  .video-area { flex: 1; display: flex; flex-direction: column; }
+  .video-surface { flex: 1; display: flex; align-items: center; justify-content: center;
+                   color: #6f6a78; font-size: 13px; }
+  .ctrl { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: #1a171f; }
+  .icbtn { color: var(--on-var); font-size: 14px; }
+  .progress { flex: 1; height: 4px; border-radius: 2px; background: var(--outline); position: relative; }
+  .progress i { position: absolute; left: 0; top: 0; bottom: 0; width: 38%; background: var(--primary); border-radius: 2px; }
+  .time { color: var(--on-var); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .panel { width: 340px; background: var(--surface); display: flex; flex-direction: column; overflow: hidden; }
+  .panel-body { flex: 1; overflow: auto; }
+
+  /* ── 分屏线：就是一条线，没有把手/图标 ── */
+  .split-v { width: 1px; background: var(--outline); }
+  .split-h { height: 1px; background: var(--outline); }
+
+  .phone { width: 380px; border: 1px solid var(--outline); border-radius: 20px; overflow: hidden; background: var(--video); }
+  .phone .video-area { height: 290px; flex: none; }
+  .tabs4 { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+  .mini { width: 262px; background: var(--surface); border: 1px solid var(--outline); border-radius: 12px; overflow: hidden; }
+  .mini h4 { font-size: 12px; font-weight: 500; color: var(--on-var); padding: 10px 14px; background: #1a171f; margin: 0; }
+</style>
+</head>
+<body>
+
+<h1>播放器分屏面板 · 界面示意</h1>
+<div class="note">
+  组件与设置页完全一致：<b>SettingsList / SettingsSection / SettingsSliderTile / SelectTile / SettingsTile</b>；
+  页签条照<b>收藏页</b>的胶囊指示器 <b>TabBar</b>；选择项一律<b>下拉</b>（SelectTile），不用一排按钮。<br>
+  面板契约 = <b>5 个 tab</b>（选集 / 弹幕 / 画面 / 播放 / 更多），见 <code>docs/player-split-panel-plan.md</code> §1.3。
+</div>
+
+<!-- ═══════ 1 · 横屏左右分屏 ═══════ -->
+<h2>1 · 横屏：左右分屏（默认满屏，呼出面板后视频变窄）</h2>
+<div class="win">
+  <div class="win-main">
+    <div class="video-area">
+      <div class="video-surface">视频画面（16:9 等比 · 居中 · 黑边）</div>
+      <div class="ctrl">
+        <span class="icbtn">▶</span>
+        <span class="icbtn">⏮</span>
+        <span class="icbtn">⏭</span>
+        <div class="progress"><i></i></div>
+        <span class="time">12:34 / 24:00</span>
+        <span class="icbtn">🔊</span>
+        <span class="icbtn">⛶</span>
+      </div>
+    </div>
+    <div class="split-v"></div>
+    <div class="panel">
+      <div class="tabbar">
+        <span class="tab">选集</span><span class="tab">弹幕</span>
+        <span class="tab">画面</span><span class="tab on">播放</span>
+        <span class="tab">更多</span><span class="close">✕</span>
+      </div>
+      <div class="panel-body">
+        <div class="section-title">播放</div>
+        <div class="card">
+          <div class="slider-row">
+            <div class="slider-head">
+              <span class="ic">⚡</span><span class="label">倍速</span><span class="chip">1.5x</span>
+            </div>
+            <div class="track"><i style="width:38%"></i><b style="left:calc(38% - 8px)"></b></div>
+          </div>
+          <div class="slider-row">
+            <div class="slider-head">
+              <span class="ic">🔊</span><span class="label">音量</span><span class="chip">80</span>
+            </div>
+            <div class="track"><i style="width:80%"></i><b style="left:calc(80% - 8px)"></b></div>
+          </div>
+          <div class="row"><span class="ic">⏭</span><span class="label">跳过片头 / 片尾</span><span class="val">90s</span><span class="chev">▾</span></div>
+          <div class="row"><span class="ic">⏱</span><span class="label">定时关闭<span class="desc">含自定义时长</span></span><span class="val">关</span><span class="chev">▾</span></div>
+          <div class="row"><span class="ic">◱</span><span class="label">画中画</span><span class="chev">›</span></div>
+          <div class="row"><span class="ic">📡</span><span class="label">远程投屏</span><span class="chev">›</span></div>
+          <div class="row"><span class="ic">↗</span><span class="label">外部播放</span><span class="chev">›</span></div>
+          <div class="row"><span class="ic">📷</span><span class="label">截图<span class="desc">入口 + 候选历史</span></span><span class="chev">›</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="note">
+  视频区与面板之间<b>只有一条分屏线</b>（不加把手/图标、不占布局宽度）；把线拖到任意位置即可改比例，
+  双击复位（横屏默认取可用宽度的 1/3，与侧栏同口径 320~420）。视频区保持全屏高度、等比变窄。
+</div>
+
+<!-- ═══════ 2 · 竖屏上下分屏 ═══════ -->
+<h2>2 · 竖屏：上下分屏</h2>
+<div class="phone">
+  <div class="video-area">
+    <div class="video-surface" style="flex:1">视频画面</div>
+    <div class="ctrl">
+      <span class="icbtn">▶</span>
+      <div class="progress"><i></i></div>
+      <span class="icbtn">⛶</span>
+    </div>
+  </div>
+  <div class="split-h"></div>
+  <div class="panel" style="width:100%; height:340px">
+    <div class="tabbar">
+      <span class="tab on">选集</span><span class="tab">弹幕</span>
+      <span class="tab">画面</span><span class="tab">播放</span>
+      <span class="tab">更多</span><span class="close">✕</span>
+    </div>
+    <div class="panel-body">
+      <div class="row"><span class="ic">✓</span><span class="label">第 1 集</span><span class="val">正在播放</span></div>
+      <div class="row"><span class="ic">·</span><span class="label">第 2 集</span></div>
+      <div class="row"><span class="ic">·</span><span class="label">第 3 集</span></div>
+      <div class="row"><span class="ic">·</span><span class="label">第 4 集</span></div>
+      <div class="row"><span class="ic">·</span><span class="label">第 5 集</span></div>
+    </div>
+  </div>
+</div>
+<div class="note">横向分屏线同样可拖（面板占可用高度的 30%~70%）；选集最常用，默认停在这一页。</div>
+
+<!-- ═══════ 3 · 五个 tab ═══════ -->
+<h2>3 · 面板五个 tab（收编全部散落功能）</h2>
+<div class="tabs4">
+
+  <div class="mini">
+    <h4>选集（原选集弹窗 + 顶栏下载）</h4>
+    <div class="tabbar" style="padding:4px 12px 4px 16px">
+      <span class="tab on" style="height:36px;font-size:13px">线路 1</span>
+      <span class="tab" style="height:36px;font-size:13px">线路 2</span>
+    </div>
+    <div class="card" style="margin:12px 16px 16px">
+      <div class="row"><span class="ic">✓</span><span class="label">第 1 集</span><span class="val">正在播放</span></div>
+      <div class="row"><span class="ic">·</span><span class="label">第 2 集</span><span class="val">下载中 62%</span></div>
+      <div class="row"><span class="ic">·</span><span class="label">第 3 集</span><span class="val">已完成</span></div>
+      <div class="row"><span class="ic">·</span><span class="label">第 4 集</span><span class="val">失败 · 重试</span></div>
+    </div>
+    <div class="note" style="margin:0 16px 12px;padding:0">每集自带下载按钮与状态（解析中 / 排队 / 下载中 / 完成 / 失败），进入时自动定位当前集。</div>
+  </div>
+
+  <div class="mini">
+    <h4>弹幕（原弹幕设置弹窗）</h4>
+    <div class="section-title" style="padding:12px 32px 6px">显示效果</div>
+    <div class="card" style="margin:0 16px 16px">
+      <div class="slider-row" style="padding:10px 14px 14px">
+        <div class="slider-head" style="margin-bottom:8px">
+          <span class="label" style="font-size:13px">字体大小</span><span class="chip">32</span>
+        </div>
+        <div class="track"><i style="width:58%"></i><b style="left:calc(58% - 8px)"></b></div>
+      </div>
+      <div class="slider-row" style="padding:10px 14px 14px">
+        <div class="slider-head" style="margin-bottom:8px">
+          <span class="label" style="font-size:13px">不透明度</span><span class="chip">100%</span>
+        </div>
+        <div class="track"><i style="width:100%"></i><b style="left:calc(100% - 16px)"></b></div>
+      </div>
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">滚动弹幕</span><span class="switch"></span></div>
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">顶部弹幕</span><span class="switch"></span></div>
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">底部弹幕</span><span class="switch off"></span></div>
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">时间偏移</span><span class="chev">›</span></div>
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">屏蔽设置</span><span class="chev">›</span></div>
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">弹幕检索 / 换库</span><span class="chev">›</span></div>
+    </div>
+  </div>
+
+  <div class="mini">
+    <h4>画面（原底栏超分/比例 + 画面调节 + 视频详情）</h4>
+    <div class="card" style="margin:12px 16px 16px">
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">超分辨率</span><span class="val">效率</span><span class="chev">▾</span></div>
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">视频比例</span><span class="val">适应</span><span class="chev">▾</span></div>
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">画面调节<span class="desc">锐化 / 对比度 / 饱和度 / 亮度 / 伽马</span></span><span class="chev">›</span></div>
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">视频信息</span><span class="chev">›</span></div>
+    </div>
+    <div class="section-title" style="padding:6px 32px 6px">视频信息（二级页 · 原视频详情弹窗）</div>
+    <div class="tabbar" style="padding:4px 12px 4px 16px">
+      <span class="tab on" style="height:36px;font-size:13px">Info</span>
+      <span class="tab" style="height:36px;font-size:13px">Log</span>
+    </div>
+    <div class="card" style="margin:12px 16px 16px">
+      <div class="row" style="min-height:44px"><span class="label" style="font-size:13px">分辨率</span><span class="val">1920×1080</span></div>
+      <div class="row" style="min-height:44px"><span class="label" style="font-size:13px">编码</span><span class="val">H.264</span></div>
+      <div class="row" style="min-height:44px"><span class="label" style="font-size:13px">硬解</span><span class="val">d3d11va</span></div>
+      <div class="row" style="min-height:44px"><span class="label" style="font-size:13px">渲染</span><span class="val">D3D11</span></div>
+      <div class="row" style="min-height:44px"><span class="label" style="font-size:13px">弹幕库</span><span class="val">已匹配</span></div>
+    </div>
+  </div>
+
+  <div class="mini">
+    <h4>播放（原底栏倍速 + 更多菜单的播放项）</h4>
+    <div class="card" style="margin:12px 16px 16px">
+      <div class="slider-row" style="padding:10px 14px 14px">
+        <div class="slider-head" style="margin-bottom:8px">
+          <span class="label" style="font-size:13px">倍速</span><span class="chip">1.5x</span>
+        </div>
+        <div class="track"><i style="width:38%"></i><b style="left:calc(38% - 8px)"></b></div>
+      </div>
+      <div class="slider-row" style="padding:10px 14px 14px">
+        <div class="slider-head" style="margin-bottom:8px">
+          <span class="label" style="font-size:13px">音量</span><span class="chip">80</span>
+        </div>
+        <div class="track"><i style="width:80%"></i><b style="left:calc(80% - 8px)"></b></div>
+      </div>
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">跳过片头 / 片尾</span><span class="val">90s</span><span class="chev">▾</span></div>
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">定时关闭<span class="desc">含自定义时长</span></span><span class="val">关</span><span class="chev">▾</span></div>
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">画中画</span><span class="chev">›</span></div>
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">远程投屏</span><span class="chev">›</span></div>
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">外部播放</span><span class="chev">›</span></div>
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">截图<span class="desc">入口 + 候选历史</span></span><span class="chev">›</span></div>
+    </div>
+  </div>
+
+  <div class="mini">
+    <h4>更多（原更多菜单的收尾项）</h4>
+    <div class="card" style="margin:12px 16px 16px">
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">播放器调试开关</span><span class="switch off"></span></div>
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">调试信息</span><span class="chev">›</span></div>
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">刷新播放源</span><span class="chev">›</span></div>
+      <div class="row" style="min-height:48px"><span class="label" style="font-size:13px">重新加载</span><span class="chev">›</span></div>
+    </div>
+    <div class="note" style="margin:0 16px 12px;padding:0">这里<b>不设</b>「去设置页」入口：长尾项（默认倍速、硬解、后台播放、动画开关）留在设置页。</div>
+  </div>
+
+</div>
+<div class="note">
+  五个 tab 就是原来要弹窗才能调的五类东西；<b>画面调节 / 视频信息 / 时间偏移 / 屏蔽 / 弹幕检索</b> 这类二级页在面板内打开（带返回箭头），不遮画面、不跳页。
+</div>
+
+<!-- ═══════ 4 · 播放器精简 ═══════ -->
+<h2>4 · 播放器只留播放相关按钮</h2>
+<div class="win" style="width:820px">
+  <div class="video-area" style="height:300px">
+    <div class="video-surface">视频画面</div>
+    <div class="ctrl">
+      <span class="icbtn">▶</span>
+      <span class="icbtn">⏮</span>
+      <span class="icbtn">⏭</span>
+      <div class="progress"><i></i></div>
+      <span class="time">12:34 / 24:00</span>
+      <span class="icbtn">🔊</span>
+      <span class="icbtn">⛶</span>
+    </div>
+  </div>
+</div>
+<div class="note">
+  顶栏：<b>返回 · 标题 · 跳过 · 弹幕开关 · ⚙（面板）</b>；
+  底栏：<b>播放/暂停 · 上一集 · 下一集 · 进度条 · 音量 · 全屏</b>。<br>
+  收进面板的：选集、下载、弹幕设置、弹幕检索、屏蔽、时间偏移、超分辨率、视频比例、
+  画面调节、视频信息、倍速、音量、跳过片头/片尾、定时关闭、画中画、投屏、外部播放、截图、调试与刷新。
+</div>
+
+</body>
+</html>

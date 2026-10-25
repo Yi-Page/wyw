@@ -15,7 +15,7 @@
 class jm extends PluginSource {
     name = '禁漫天堂'
     key = 'jm'
-    version = '1.0.0'
+    version = '1.1.0'
 
     static jmVersion = '2.0.16'
     static jmPkgName = 'com.example.app'
@@ -41,6 +41,10 @@ class jm extends PluginSource {
     getUrl() {
         return this.baseUrl
     }
+
+    /// 「按ID直达」入口名。它不是真分类，而是借浏览页的分类按钮承载的快捷动作：
+    /// 点击分类 → getCategoryOptions 弹输入框 → loadCategory 收到 ID 渲染详情。
+    static idJumpCategory = '按ID直达'
 
     // 分类映射：week=每週必看（期数/类型）；category=用 slug 调 categories/filter；
     // 未列出的分类默认走搜索接口（search?search_query=分类名）。
@@ -90,9 +94,14 @@ class jm extends PluginSource {
     }
 
     get baseUrl() {
-        let index = parseInt(this.loadSetting('apiDomain')) - 1
+        let raw = this.loadSetting('apiDomain')
+        // wyw 未设置的设置项返回 ''（非 undefined）。parseInt('')=NaN，
+        // 而 NaN < 0 与 NaN >= length 都恒 false，会落到 domains[NaN]=undefined
+        // → https://undefined（经典 NaN 比较坑）。这里统一兜底为线路 1。
+        if (raw === undefined || raw === null || raw === '') raw = '1'
+        let index = parseInt(raw) - 1
         let domains = jm.apiDomains || jm.fallbackServers
-        if (index < 0 || index >= domains.length) index = 0
+        if (isNaN(index) || index < 0 || index >= domains.length) index = 0
         return 'https://' + domains[index]
     }
 
@@ -379,6 +388,8 @@ class jm extends PluginSource {
         return {
             title: '禁漫天堂',
             parts: [
+                // 借分类按钮做入口（见 [idJumpCategory]）：点击 → 弹输入框 → 按 ID 直达详情
+                { name: '快捷', categories: [jm.idJumpCategory] },
                 { name: '每週必看', categories: ['每週必看'] },
                 { name: '成人A漫', categories: ['最新A漫', '同人', '單本', '短篇', '其他類', '韓漫', '美漫', 'Cosplay', '3D', '禁漫漢化組'] },
                 { name: '主題A漫', categories: ['無修正', '劇情向', '青年漫', '校服', '純愛', '人妻', '教師', '百合', 'Yaoi', '性轉', 'NTR', '女裝', '癡女', '全彩', '女性向', '完結', '禁漫漢化組'] },
@@ -390,8 +401,13 @@ class jm extends PluginSource {
     }
 
     /// 获取某分类的筛选选项（venera 的 optionLoader 对应）。
-    /// 每週必看：期数 + 类型；其他分类：排序。
+    /// 每週必看：期数 + 类型；其他分类：排序；「按ID直达」：一个输入框。
     async getCategoryOptions(category) {
+        // 「按ID直达」：借 input 类型的筛选项拿用户输入的数字 ID
+        // （框架的筛选弹窗会渲染输入框，确认后值进入 loadCategory 的 options）
+        if (category === jm.idJumpCategory) {
+            return [{ label: '漫画ID（纯数字）', type: 'input' }]
+        }
         if (category !== '每週必看') {
             return [
                 {
@@ -470,6 +486,10 @@ class jm extends PluginSource {
     /// 加载某分类第一页：返回分页容器（分页控制 + 声明单页数据来源）。
     /// 本页内容由 renderer 首次渲染时调用 `pageMethod` 加载，无需传 children。
     async loadCategory(category, page = 1, options = []) {
+        // 「按ID直达」：options[0] 是输入框里的漫画 ID，直接复用详情渲染
+        if (category === jm.idJumpCategory) {
+            return await this._loadByIdJump(options)
+        }
         const { maxPage } = await this._fetchCategoryComics(category, page, options)
         return [
             UI.Pagination({
@@ -485,6 +505,34 @@ class jm extends PluginSource {
     async loadCategoryPage(category, page = 1, options = []) {
         const { comics } = await this._fetchCategoryComics(category, page, options)
         return comics.map((e) => this._comicCard(this._parseComic(e)))
+    }
+
+    /// 「按ID直达」：把输入框里的数字 ID 当漫画 ID，直接渲染详情内容。
+    ///
+    /// 输入由框架的筛选弹窗（[getCategoryOptions] 的 input 类型）提供，经
+    /// `options[0]` 传入。返回 [getDetail] 的描述符列表，让详情渲染在**当前**
+    /// 页面；若改用 `Navigator.navigateToDescriptor` 会在路由栈里多留一个
+    /// 空白页面（返回时可见）。
+    async _loadByIdJump(options) {
+        let raw = (options && options.length > 0 && options[0] != null) ? String(options[0]) : ''
+        let id = raw.trim()
+        if (id.length === 0) {
+            return [
+                UI.Text({
+                    content: '未输入漫画ID，请返回后重新点击「按ID直达」',
+                    style: { fontSize: 14, color: '#FF0000' },
+                }),
+            ]
+        }
+        if (!/^\d+$/.test(id)) {
+            return [
+                UI.Text({
+                    content: '漫画ID只能是数字（当前输入：' + raw + '）',
+                    style: { fontSize: 14, color: '#FF0000' },
+                }),
+            ]
+        }
+        return await this.getDetail(id)
     }
 
     // ============ 详情 ============
@@ -531,6 +579,8 @@ class jm extends PluginSource {
         let cover = this.getCoverUrl(id)
         let authors = data.author || []
         let tags = data.tags || []
+        let works = data.works || []
+        let actors = data.actors || []
         let description = data.description || ''
         let updateDate = ''
         if (data.addtime) {
@@ -548,8 +598,14 @@ class jm extends PluginSource {
         }
         let metaLines = []
         if (authors.length > 0) metaLines.push('作者: ' + authors.join('、'))
+        if (works.length > 0) metaLines.push('作品: ' + works.join('、'))
+        if (actors.length > 0) metaLines.push('角色: ' + actors.join('、'))
         if (tags.length > 0) metaLines.push('标签: ' + tags.join('、'))
         if (updateDate) metaLines.push('更新: ' + updateDate)
+        let statLine = []
+        if (data.total_views) statLine.push('浏览 ' + data.total_views)
+        if (data.likes) statLine.push('喜欢 ' + data.likes)
+        if (statLine.length > 0) metaLines.push(statLine.join(' · '))
         headerChildren.push(
             UI.Expanded({
                 child: UI.Column({
@@ -610,6 +666,17 @@ class jm extends PluginSource {
                     ],
                 })
             )
+        }
+
+        // 相关推荐（上游 venera 的 ComicDetails.recommend）
+        let related = data['related_list'] || []
+        if (related.length > 0) {
+            items.push(
+                UI.Text({ content: '相关推荐', style: { fontSize: 14, weight: 'bold' }, maxLines: 1 })
+            )
+            for (let e of related) {
+                items.push(this._comicCard(this._parseComic(e)))
+            }
         }
 
         PluginBrowse.open('jm', {

@@ -1,7 +1,7 @@
 # Wyw 插件开发文档
 
 > 本文档由现有代码库整理而成，是 wyw 插件开发（视频源 / 漫画源 / 小说源）的权威参考。
-> 依据：`assets/js/init.js`（JS API 库）、`assets/plugin/*.js`（5 个示例插件）、`lib/js/**`（JS 桥 Dart 实现）、`lib/plugins/plugin.dart` 与 `lib/pages/plugin/plugin_controller.dart`（插件运行时）。
+> 依据：`assets/js/init.js`（JS API 库）、`assets/plugin/*.js`（内置插件）、`lib/js/**`（JS 桥 Dart 实现）、`lib/plugins/plugin.dart` 与 `lib/pages/plugin/plugin_controller.dart`（插件运行时）。
 
 ---
 
@@ -36,7 +36,8 @@ wyw 是一个基于 Flutter 的聚合阅读/播放 App，通过 **JS 插件机�
 | `lib/js/script_engine.dart` | `ScriptEngine`：测试台（`runTest`，捕获 log + 异步结果） |
 | `lib/js/entity/js_entity.dart` | `JsEntity`：插件类实例的注册 / 调用 / 热重载 / 卸载 |
 | `lib/js/js_extends/js_bridge.dart` | `JSEngineCommonApi`：**JS→Dart 消息路由**（全部 `sendMessage` method） |
-| `lib/js/js_extends/js_network.dart` | `JsNetwork`：HTTP 请求 + WebView 取页面 HTML |
+| `lib/js/js_extends/js_network.dart` | `JsNetwork`：**只做 HTTP 请求**（Dio + Cookie 注入/摄入 + 重试），不再持有 WebView |
+| `lib/js/js_extends/js_webview.dart` | `JsWebview`：**WebView 能力的唯一归属地** —— 一次性取页 `fetchHtml` + 交互会话（验证码留页）`open/exec/…/close` |
 | `lib/js/js_extends/js_codec.dart` | `JsCodec`：编码 / 加密 / 随机 / UUID |
 | `lib/js/js_extends/js_descriptor.dart` | `UiType` 枚举 + `UiAction` + `UiNavigate` |
 | `lib/js/js_extends/js_descriptor_renderer.dart` | UI 描述符 → Flutter Widget 渲染器 |
@@ -48,20 +49,89 @@ wyw 是一个基于 Flutter 的聚合阅读/播放 App，通过 **JS 插件机�
 | `lib/pages/descriptor/` | 详情页（descriptor，通过 `UI.Navigate` 进入） |
 | `lib/pages/video/` | 视频播放页（`Navigator.navigateToVideo` 进入，自带资源嗅探） |
 | `lib/pages/novel_reader/` | 小说阅读器（`Navigator.navigateToNovelReader` 进入） |
-| `assets/plugin/*.js` | **5 个示例插件**：hanime / bmmdmm（视频）、hot_manga / jm / ehentai（漫画） |
+| `assets/plugin/*.js` | 随包的**出厂安装包载荷**（37 个）。只在插件目录为空时被安装一次，装完就是普通插件 |
 
 ### 1.2 插件生命周期
 
 1. **放置**：把 `xxx.js` 复制到 `{appSupportDir}/plugins/`，重启 App 后在插件管理页刷新。
-2. **注册**：`PluginController` 扫描该目录，`Plugin.fromFile` 读取源码；`JsEntity.register` 把源码包在 IIFE 中执行，创建 `new <ClassName>()` 实例挂载到 `globalThis.__plugins__.<name>`。
+2. **注册**：`PluginController` 扫描该目录，**以 `plugins/index.json` 的记录为基准**对账
+   （顺序与展示名 / 分类 / 主页 / 简介都取自那里），读源码后 `JsEntity.register` 把源码
+   包在 IIFE 中执行，创建 `new <ClassName>()` 实例挂载到 `globalThis.__plugins__.<name>`。
 3. **调用**：页面调用 `plugin.invoke(method, args)` / `plugin.invokeWidgets(method, args)`。async 方法返回 Promise，框架自动等待；返回值 JSON 序列化还原。
 4. **热重载**：修改源码后 `plugin.reload`（先 unload 再重新 register），无需重启 App。
+5. **出厂安装**：全新安装时插件目录是空的，此时把随包的 `assets/plugin/` 当作**出厂
+   安装包**执行一次 —— 按 `assets/plugin/index.json`（**出厂配置**，与运行时同格式）
+   把载荷逐个复制进插件目录，并把这份配置写成 `index.json`。37 个插件
+   **全部 `enabled: false`**，即出厂是一张待导入的菜单。
+   **只在「一个插件都没有」（目录里没有任何 `.js` 且索引里没有记录）时执行**；
+   装完之后它们就是**普通插件** —— 可编辑、可禁用、可删除，删了不会再回来
+   （没有「内置」这个身份，也没有每次启动的重新同步）。
+   出厂配置由 `node tools/gen_plugin_seed.js` 从这些插件抽取（`// description:` → 简介、
+   `// type:` → 分类、类字段 `name = '…'` → 展示名）；抽完之后这些元数据**只活在那份
+   JSON 里**，插件源码不再携带。
 
-> ⚠️ **硬性约定**：**类名必须等于文件名（去 `.js`）**，否则 `JsEntity.register` 找不到类。文件头元数据注释会被解析并展示：
-> - `// description: ...` — 插件描述（展示在插件列表）
-> - `// type: video|manga|novel` — 插件分类（可选，影响搜索页 tab 图标与分类筛选）。缺失时按插件实现的方法自动推断（`play`→视频、`openReader`→漫画、`openNovelReader`→小说），推断不出则归为「其他」。
+> ⚠️ **硬性约定（命名链，四环逐字符相同）**：
 >
-> **插件管理（导入/禁用）**：删除 = 删文件；**禁用 = 不删文件但卸载**（插件不再出现在 App 中，文件保留在磁盘，管理页「已禁用」分区按名称可见），重新点「导入」即快速重新加载并恢复原排序位置。
+> ```
+> 文件名 hanime.js = 记录主键 index.json 里那条 "name": "hanime"
+>                  = JS 类名 class hanime extends PluginSource
+>                  = 引擎槽位 __plugins__["hanime"]
+> ```
+>
+> 注册前由 `PluginSourceRule.check` 校验：**顶层恰好一处类声明**（从第 1 列开始、
+> `extends PluginSource` 与类名同一行），且**类名与插件名逐字符相同**（大小写敏感）。
+> 不通过时插件判为不可用，错误信息带行号。
+>
+> 插件名只能由字母或下划线开头、仅含字母/数字/下划线（不能有 `-`、`.`、空格），
+> 且必须**大小写不敏感唯一**（文件系统不敏感，`hanime` 与 `Hanime` 是同一个文件）。
+>
+> 持久化细节见 [`plugin-storage-spec.md`](plugin-storage-spec.md)：全部插件信息
+> （展示名 / 分类 / 主页 / 简介 / 是否启用）都在 `index.json` 里，顺序就是列表位置。
+>
+> ### 1.2.1 插件代码里只有代码
+>
+> **不要在类体里写 `name` / `key` / `version` / `homepage` 这类元数据字段。**
+> 宿主需要的元数据全部是 `index.json` 里那条记录的字段；文件头注释也不再是线索
+> （旧的 `// description:` / `// type:` 之类注释现在**完全不读**）。
+>
+> | 类别 | 例子 | 在插件代码里 | 在插件实例上 |
+> |---|---|---|---|
+> | **插件自己的逻辑与字段** | `search()`、`settings`、内部缓存、`this._categoryData` | ✅ | ✅ |
+> | **宿主台账**（展示名 / 分类 / 主页 / 简介 / 是否启用 / 顺序） | —— | ❌ | ❌ |
+>
+> **这些都能在管理页自己填、自己改**：详情页「基本」段可改展示名与分类，
+> 「管理属性」里可改简介与主页；启用 / 禁用 / 拖拽排序也都在管理页。
+>
+> **`key` 也不要写**：基类**根本没有** `key` 这个成员 —— 存储命名空间（`loadData` /
+> `loadSetting` / `saveSetting` / `deleteData` / `isLogged` 的消息 `key`）由基类直接取
+> `this.constructor.name`，也就是插件名。所以声明 `key = '…'` 只会得到一份**没人读的死数据**，
+> 影响不到存储（历史上 `komiic` → `"Komiic"` 那类错位已经不可能发生）。
+> 要在自己的代码 / 描述符里带名字，直接写 `this.constructor.name`。
+> 类名在 `new` 的那一刻就已确定，所以「构造函数里调 `init()` → 同步 `loadSetting()`」
+> 这种写法（现存 22/37 个）不受影响。
+>
+> `node tools/check_plugin_naming.js` 会把这些旧写法列出来（提示，不算违规）；
+> 该时序由 `--self-test` 的「存储命名空间派生自检」锁住。
+>
+> ### 1.2.2 版本与更新：第一版不做版本管理
+>
+> 插件记录里**没有版本字段**：`version` / `author` / `minAppVersion` 都已移除，
+> 管理页也没有「可更新」判定与更新入口。启动时的内置插件同步只做一件事 ——
+> **把用户目录里缺失的内置文件复制过去**（复制进来的默认是**禁用**，等你在管理页「导入」）。
+>
+> 因此改 `assets/plugin/*.js` 的代码后要注意：**它只影响全新安装**。已经装到用户目录的
+> 那份不会被覆盖，删掉也不会自动恢复 —— 要么在插件详情页的「代码」段直接改，
+> 要么删掉用户目录里的 `{appSupportDir}/plugins/<名字>.js`，再清空 `index.json`
+> 与目录里其余 `.js` 才会重新触发一次出厂安装。
+>
+> **插件管理（导入 / 禁用）**：删除 = 删文件；**禁用 = 不删文件但卸载**（插件不再出现在
+> App 中，文件保留在磁盘，管理页「已禁用」分区按名称可见），点「导入」即快速重新加载。
+> **禁用插件在全量列表里的位置不变** —— 顺序就是列表位置，与启用状态无关。
+>
+> 管理页把**同一个全量列表**切成三块展示：主列表（已启用）、已禁用、
+> 异常（加载失败 + 文件名非法）；还支持从本地 `.js` 文件 / 剪贴板 JSON 导入，
+> 导出全部或选中插件到剪贴板或文件，自定义分类的新建 / 改名 / 选图标 / 删除，
+> 搜索与状态筛选（全部 / 内置 / 第三方），以及不重启 App 的「刷新」（重扫插件目录）。
 
 ---
 
@@ -120,8 +190,8 @@ Convert.hexEncode(bytes) => string               // 字节 → hex 字符串
 | `Network.sendRequest(method, url, headers, data, extra?)` | `Promise<{status, headers, body}>` | 完整响应 |
 | `Network.fetchBytes(method, url, headers, data, extra?)` | `Promise<{status, headers, body}>` | body 为原始字节 |
 | `Network.fetch(url, options?)` | `Promise<{ok, status, headers, arrayBuffer(), text(), json()}>` | 浏览器 fetch 风格 |
-| `Network.getHtml(url, options?)` | `Promise<string>` | **经系统 WebView 加载页面**并返回渲染后 HTML（绕过 Cloudflare / JS 渲染 / 反爬）。`options` 可为旧式超时秒数（`getHtml(url, 30)`）或对象 `{timeout, waitFor}` |
-| `Network.webview(url, options?)` | `Promise<{html, finalUrl}>` | 同 `getHtml`，额外返回**最终 URL**（跟随 302 / JS 跳转后的落地地址，如 page_direct 重定向目标域） |
+| `Network.getHtml(url, options?)` | `Promise<string>` | **经系统 WebView 加载页面**并返回渲染后 HTML（绕过 Cloudflare / JS 渲染 / 反爬）。`options` 可为旧式超时秒数（`getHtml(url, 30)`）或对象 `{timeout, waitFor}`。底层已由 `lib/js/js_extends/js_webview.dart`（`JsWebview.fetchHtml`）承载，**行为不变** |
+| `Network.webview(url, options?)` | `Promise<{html, finalUrl}>` | 同 `getHtml`，额外返回**最终 URL**（跟随 302 / JS 跳转后的落地地址，如 page_direct 重定向目标域）。同样由 `JsWebview.fetchHtml` 承载 |
 
 > - **失败返回结构化错误**：非 2xx / 超时 / 断连 / DNS 失败时，`await` reject 一个带属性的 `Error`：
 >   `e.kind`（`timeout` / `connect` / `dns` / `ssl` / `http` / `cancel` / `webview` / `other`）、
@@ -163,6 +233,40 @@ Convert.hexEncode(bytes) => string               // 字节 → hex 字符串
 >   多个 getHtml 并发不会互相踩踏）。`Network.cookies(url, session)` 指定会话查询。
 >   注：WebView 侧因共享 WebView2 profile，多会话同域仍互通；请求侧 Cookie 隔离可靠。
 
+### 2.3.1 Webview — 交互式 WebView 会话（验证码 / 页面内操作）
+
+> 底层实现是 `lib/js/js_extends/js_webview.dart` 的 `JsWebview`（WebView 能力的唯一归属地）。
+> `Network.getHtml` / `Network.webview` 是它的**一次性取页**用法（2.3）；`Webview.*` 是它的
+> **留页式交互**用法：页面留住 → 取验证码图 → 用户输入 → 页面内回填点击 → 取 HTML/UA → 收尾拿 cookie。
+
+| API | 返回 | 说明 |
+|---|---|---|
+| `Webview.open(url, {session, mode, captchaXpath, inputXpath, buttonXpath, script, timeout, maxLifetimeMs})` | `Promise<string>`（`finalUrl`） | 打开并**留住**交互会话，返回最终落地地址（跟随跳转后）。`mode`：`'image'`（图片验证码，默认）/ `'button'`（按 `buttonXpath` 自动点一次）/ `'script'`（注入 `script`，走 `window.WywCaptcha` 回调协议）。参数对应关系：`image` 用 `captchaXpath`（图）+ 可选 `inputXpath`（先 focus 输入框）；`button` 用 `buttonXpath`；`script` 用 `script`。`timeout` 秒（默认 30）是「等页面进入可用状态」的上限（超时不判失败）。对同一 `session` 重复调用 = 重新加载页面（验证码「换一张」） |
+| `Webview.exec(js, {session})` | `Promise<string\|null>` | 在留着的页面里执行任意 JS，返回字符串结果（不可序列化时为 `null`） |
+| `Webview.getHtml({session})` | `Promise<string>` | 当前页面 HTML（页面仍在 loading 时返回空串） |
+| `Webview.getUserAgent({session})` | `Promise<string>` | 交互 WebView 实际使用的 User-Agent |
+| `Webview.fillAndClick({session, code, inputXpath, buttonXpath})` | `Promise<void>` | 按 `inputXpath` 用**原生 value setter** 回填 `code` 并派发 `input`/`change`，再 `click()` 按 `buttonXpath` 找到的提交按钮（React/Vue 受控组件才认） |
+| `Webview.awaitImage({session, timeout})` | `Promise<string>` | 等验证码图，返回 `canvas.toDataURL('image/png')` 的 dataURL；`timeout` 秒（默认 30）超时 reject。**早到的图不会丢**（`open` 时已订阅） |
+| `Webview.awaitGone({session, timeout})` | `Promise<void>` | 等验证通过（验证码元素消失 / 自动点击后跳转 / 脚本 `done`）；`timeout` 秒（默认 60）超时 reject；通过后会顺手同步一次页面 Cookie |
+| `Webview.close({session, keepCookies, dispose})` | `Promise<void>` | 收尾。`keepCookies` 默认 **true**：平台 WebView Cookie 罐与**会话 cookie 库**都保留，刚拿到的 clearance cookie 可直接给 `Network.*` 用；传 `false` 表示这次验证的登录态**一点都不留**（两者一起丢弃）。`dispose` 默认 **false**（先卸页 + 排空闲回收，便于快速「换一张」），`true` 立即销毁 |
+| `Webview.cookies(url, session)` | `Promise<string>` | 查该会话 cookie 字符串；与 `Network.cookies(url, session)` 等价（同一份 cookie 库） |
+
+> - **`session` 语义**：默认 `''`。交互会话的 Cookie **与请求侧共用同一会话库** —— `Webview.close()`（默认 `keepCookies:true`）之后用 `Network.*` 会自动带上验证拿到的 cookie；不同 `session` 之间 Cookie 隔离。
+>   交互实例与 `Network.getHtml` 的一次性实例是**两个独立槽位**（互不打断、互不阻塞），但同一 `session` 的 cookie 共用。
+> - **租约与最长寿命**：`open` 期间实例**不会被空闲回收**（这样页面才能留住等用户输入）；`maxLifetimeMs` 默认 5 分钟（显式值 clamp 到 30s..15min），到点强制 close，之后 `exec`/`getHtml` 等返回结构化错误。
+> - **错误契约**：失败 reject 一个带属性的 `Error`（`e.kind='webview'`、`e.retryable`、`e.status`，`e.message` 与 Dart 侧 `error.message` 一致）；**未 `open` 就调用**（或已到最长寿命）是 `retryable:false` 的结构化错误，不会抛未捕获异常、也不会静默返回 `null`。
+> - `Webview.*` 与 `Network.getHtml` / `Network.webview` 共用同一份 `JsWebview`；一次性取页的 15s 空闲回收语义不变（见 2.3）。
+> - **平台差异 / 已知识别（不是缺陷）**：
+>   - `image` 模式抓**跨域且站点未开 CORS** 的 `<img>`：canvas 会被 taint，`toDataURL` 抛
+>     `SecurityError` → 宿主只记 `onLog`、**不会发出 `awaitImage` 的图**。插件可退化为
+>     `Webview.exec('document.querySelector("...").src')` 取图片 URL 自己抓。
+>   - `close({keepCookies:false})` 的**会话 cookie 库清空**在任何平台都生效（`Network.*`
+>     随后不会再带验证期间的 cookie）；但其中的**平台 Cookie 罐**清理只在 Android / iOS /
+>     macOS 生效 —— Windows 的 `dispose({clearCookies:true})` 也不清平台罐
+>     （HeadlessWebview 只有全局清理、无按域清理）。会话库在内存、平台罐在 WebView，
+>     两者是两回事。
+> - 完整配方见 [4.9 验证码交互](#49-配方验证码交互留页式-webview)。
+
 ### 2.4 HtmlDocument / HtmlElement — HTML 解析
 
 ```javascript
@@ -198,41 +302,53 @@ doc.dispose();                        // 用后释放（可选）
 
 ### 2.5 PluginSource — 插件基类（必须继承）
 
-`assets/js/init.js` 定义基类，**所有插件必须 `extends PluginSource`**。字段与方法：
+`assets/js/init.js` 定义基类，**所有插件必须 `extends PluginSource`**。基类分三类成员，
+界线很清楚：
+
+**① 机制** —— 基类给实现，插件直接用：
 
 ```javascript
 class myplugin extends PluginSource {
-    name = '站点名'          // 显示名
-    key = 'myplugin'        // 数据存储 key（load/save 使用）
-    version = '1.0.0'
-    settings = { ... }      // 设置项 schema（见 4.4）
-    translation = {}        // 多语言：{locale: {key: text}}
+    // 存储：按**插件名（= 类名）**隔离，跨会话持久化（命名空间由基类算，你声明不了）
+    loadData(dataKey)        // 自由存储：读（任意 JSON）
+    saveData(dataKey, data)  // 自由存储：写
+    deleteData(dataKey)      // 自由存储：删
+    loadSetting(key)         // 设置项的值：读
+    saveSetting(key, value)  // 设置项的值：写
 
-    // 存储：按 key 隔离，跨会话持久化
-    loadData(dataKey)        // 读数据（任意 JSON）
-    saveData(dataKey, data)  // 写数据
-    deleteData(dataKey)      // 删数据
-    loadSetting(key)         // 读设置
-    saveSetting(key, value)  // 写设置
-
-    getSettings()            // 返回 this.settings（框架自动调用，无需覆写）
-
-    // 图片加载定制（阅读器每张图调用，见 4.5）
-    getImageLoadingConfig(url, comicId, epId) { return {} }
-
-    // 分类浏览（浏览页 Tab，见 4.2）
-    getCategory() { return null }         // {title, parts:[{name, categories}]} 或 null
-    getCategoryOptions(category) { return null }  // [{label, options:[{value, text}]}] 或 null
-    loadCategory(category, page = 1, options = []) { return [] }
-    loadCategoryPage(category, page = 1, options = []) { return [] }
-
-    translate(key)           // 按当前 locale 翻译（不覆写）
-    init() { }               // 可选初始化
-    get isLogged() { ... }   // 登录态（需 Dart 侧支持）
+    get isLogged() { ... }   // 登录态（问宿主）
+    init() { }               // 构造期钩子，默认空；要在构造函数里自己 this.init()
 }
 ```
 
-> ⚠️ 引擎**不会调用 `init()`**（注释说明 wyw 引擎不调用 init，直接实例字段），初始化请直接写在实例字段 / 构造函数里（见 hot_manga.js）。
+**② 能力** —— 基类**故意不给实现**，只有插件自己实现；宿主靠
+`implementsMethod(name)` 判断「有没有这个功能」，有才调用：
+
+```javascript
+    settings = { ... }              // 设置项 schema（数据字段，见 4.4）
+    getSettings() { ... }           // 可选：想动态生成 schema 才写，否则只声明 settings
+
+    getCategory() { ... }                     // 分类浏览（见 4.2）
+    getCategoryOptions(category) { ... }
+    loadCategory(category, page, options) { ... }
+    loadCategoryPage(category, page, options) { ... }
+
+    getImageLoadingConfig(url, comicId, epId) { ... }   // 图片加载定制（见 4.5）
+    search(keyword) { ... } / getDetail(id) { ... } / openReader(id) { ... } / getUrl() { ... }
+```
+
+> ⚠️ **基类不给这些方法留空实现**：留了，`typeof plugin.getCategory === 'function'`
+> 对每个插件都成立，「有没有这个功能」就永远问不出来（宿主的能力筛选会失效）。
+> 想在插件里用别的名字存东西，声明自己的字段 —— 基类不提供、也不注入任何宿主字段。
+>
+> 探测语义（`implementsMethod`）：只认插件自己写的**可调用**成员（实例字段式
+> `search = async () => {}` 与原型方法 `search() {}` 都算）；基类成员不算；
+> 同名但赋成非函数（`getCategory = null`）表示**显式关掉**该能力。
+
+**③ 宿主元数据** —— 基类与实例上都没有：展示名 / 分类 / 版本 / 主页 / 描述 /
+是否启用 / 排序，全部是宿主台账，存在 `plugins/index.json`，插件代码里不出现。
+
+> ⚠️ 引擎**不会调用 `init()`**，初始化请写在自己的构造函数里（`constructor() { super(); this.init(); ... }`）。
 
 ### 2.6 Dialog — 对话框
 
@@ -249,7 +365,6 @@ Dialog.showSelectDialog(title, options[], initialIndex?) // → Promise<number|n
 
 ```javascript
 APP.version   // 应用版本
-APP.locale    // 当前语言，如 "zh_CN"
 APP.platform  // "android" | "ios" | "windows" | "macos" | "linux"
 ```
 
@@ -299,6 +414,20 @@ PluginBrowse.find(pluginName, id)                                   // 查询 �
 > `pluginName` 必须通过 `this.name`（即插件 key）显式传入，不能用全局变量。
 > 浏览历史回放：实现 `onOpenBrowseEntry(entry)` 方法（见 4.6）。
 
+**宿主侧语义（收藏模块）**：
+
+- 每条浏览记录同时是宿主的**收藏条目**：`collectType` 是宿主管理的收藏状态
+  （`0` 未收藏 / `1` 在看 / `2` 想看 / `3` 搁置 / `4` 看过 / `5` 抛弃），
+  插件 `open` 出来的新条目默认 `0`（未收藏）。
+- `open` 是**合并写入**：只更新 `title` / `cover` / `kv` / `visitTime`；
+  **绝不会覆盖 `collectType` / `collectedAt`**（用户数据，插件不可写）。
+- `find` 返回的 `data` 在原有字段之外**新增** `collectType` / `collectedAt`
+  （`collectedAt` 可能为 `null`）；插件可读取它们做展示，忽略即可保持兼容。
+- 宿主侧删除 = 删除整条浏览记录（收藏状态随之消失）；插件再次 `open` 会以
+  「未收藏」重建一条。
+- 存储已由 JSON 文件迁至 Hive box `collectibles`（首次启动自动从旧
+  `plugin_history.json` 导入，旧文件保留作备份）；插件接口不变。
+
 ### 2.10 UI — 描述符构造
 
 `UI.X({...})` 返回**普通 JS 对象**（含 `__type` 字段），框架递归渲染为 Flutter Widget。**返回 List 描述符的插件方法**（`search` / `getDetail` / `loadCategory` 等）都会交给渲染器。
@@ -333,6 +462,8 @@ PluginBrowse.find(pluginName, id)                                   // 查询 �
 | `pagination` | `page, maxPage, pageMethod, pageArgs` | 分页容器（见 4.3） |
 | `action` | `plugin, method, args, payload, icon` | 动作描述符（不进渲染树，作为 onTap） |
 | `navigate` | `page, method, args, title, actions` | 导航描述符（不进渲染树，作为 onTap） |
+
+**卡片尺寸约定（搜索结果 / 分类结果 / 详情页一致）**：**一张卡片独占一行**——宽度由窗口决定（铺满可用宽度），高度由卡片内容决定（插件自己定，写多少内容就多高）。所以卡片内部按「横向 `row`：封面 + `expanded` 文本 + 操作按钮」来排；不要在卡片外层写死宽高，也不要假设自己只占屏幕的 1/3（宿主不再按列数切网格）。
 
 **动作 / 导航**：
 
@@ -384,7 +515,7 @@ async play(url, title, cover) {
         videoId: this._playSources.videoId,
         title: title,
         cover: cover || '',
-        sourceKey: this.key,
+        sourceKey: this.constructor.name,
         initialSource: 0,
         initialEpisode: 0,
         sources: this._playSources.sources,   // [{ name:'线路名', episodes:[...] }]
@@ -404,7 +535,7 @@ async play(url, title, cover) {
 {
     name: '第 1 集',
     type: 'resolve',
-    plugin: this.key,          // 插件 key
+    plugin: this.constructor.name,          // 插件名（= 文件名）
     method: 'resolvePlayUrl', // 插件暴露的方法，返回 { url, type }
     args: ['/vod-play/1-1-1/']
 }
@@ -420,7 +551,7 @@ async getDetail(id) {
         const sourceEpisodes = []
         for (每个集 a) {
             const href = a.attributes.href || ''
-            sourceEpisodes.push({ name: 集名, type: 'resolve', plugin: this.key, method: 'resolvePlayUrl', args: [href] })
+            sourceEpisodes.push({ name: 集名, type: 'resolve', plugin: this.constructor.name, method: 'resolvePlayUrl', args: [href] })
         }
         this._playSources.sources.push({ name: 线路名, episodes: sourceEpisodes })
     }
@@ -437,7 +568,7 @@ async play(url, title, cover) {
     // 从 this._playSources 定位 currentSource/currentEpisode 后整体传入
     Navigator.navigateToVideo({
         videoId: this._playSources.videoId, title, cover,
-        sourceKey: this.key, initialSource, initialEpisode,
+        sourceKey: this.constructor.name, initialSource, initialEpisode,
         sources: this._playSources.sources,
     })
 }
@@ -521,9 +652,49 @@ getCategory() {
 }
 ```
 
-- `getCategoryOptions(category)`：分类的筛选选项（`[{label, options:[{value, text}]}]`），无则返回 `null`。
+- `getCategoryOptions(category)`：分类的筛选选项，无则返回 `null`。两种形态可混用：
+  - 下拉：`{label, options: [{value, text}]}`（可加 `type: 'select'`，默认即下拉）
+  - 输入框：`{label, type: 'input'}` → 框架弹出输入框，确认后**输入文本按组顺序**进入 `loadCategory` 的 `options`
 - `loadCategory(category, page, options)`：返回**分页容器**（`[UI.Pagination({...})]`）。
 - `loadCategoryPage(category, page, options)`：返回**单纯的结果列表**（`UI.Pagination` 换页时调用）。
+
+> 输入框组的值是**用户原文**（框架不校验），校验请在 `loadCategory` 里做。
+
+**借分类按钮做自定义入口**：分类按钮的行为完全由插件决定（`getCategoryOptions` → `loadCategory`），
+因此可以放"不是分类"的快捷动作 —— 只要求「先输入一个值、再自定义后续行为」的场景都能这么接：
+
+```javascript
+getCategory() {
+    return {
+        title: '站点名',
+        parts: [
+            { name: '快捷', categories: ['按ID直达'] },   // 借分类按钮承载的入口
+            { name: '分组名', categories: ['分类A'] },
+        ],
+    };
+}
+
+async getCategoryOptions(category) {
+    if (category === '按ID直达') {
+        return [{ label: '漫画ID（纯数字）', type: 'input' }];   // 弹输入框
+    }
+    return null;   // 普通分类：不弹筛选框
+}
+
+async loadCategory(category, page = 1, options = []) {
+    if (category === '按ID直达') {
+        const id = String(options[0] ?? '').trim();
+        if (!/^\d+$/.test(id)) return [UI.Text('漫画ID只能是数字')];
+        // 直接返回详情描述符 → 详情渲染在**当前**页面。
+        // 若改用 Navigator.navigateToDescriptor 会在路由栈多留一个空白页。
+        return await this.getDetail(id);
+    }
+    const { maxPage } = await this._fetchComics(category, page, options);
+    return [UI.Pagination({ page, maxPage, pageMethod: 'loadCategoryPage', pageArgs: [category, 1, options] })];
+}
+```
+
+> 完整实例见 `assets/plugin/jm.js` 的「按ID直达」（`idJumpCategory` / `getCategoryOptions` / `_loadByIdJump`）。
 
 ### 4.2 分页（UI.Pagination）
 
@@ -587,7 +758,7 @@ async getDetail(id) {
         ],
     }));
     // 4) 记录浏览历史
-    PluginBrowse.open(this.key, { id, title, cover, kv: { id } });
+    PluginBrowse.open(this.constructor.name, { id, title, cover, kv: { id } });
     return items;
 }
 ```
@@ -669,7 +840,7 @@ async onOpenBrowseEntry(entry) {
         Dialog.showToast('浏览历史无效');
         return;
     }
-    Navigator.navigateToDescriptor(this.key, {
+    Navigator.navigateToDescriptor(this.constructor.name, {
         method: 'getDetail',
         args: [entry.kv.id],
         title: entry.title || '',
@@ -737,6 +908,93 @@ getImageLoadingConfig(url, comicId, epId) {
 
 `loadChapterImages` 解析为空时**不要静默返回 `[]`**（会导致阅读器 `maxPage=0` 崩溃），应 `console.error` 打印诊断 + `throw` 带上下文的异常（`url`、HTML 长度、选择器命中数、首章节信息），阅读器会显示错误文案，用户可直接回贴。
 
+### 4.9 配方：验证码交互（留页式 WebView）
+
+适用于「首次请求被风控挡下、需要人工过验证码，之后用拿到的 cookie 继续请求」的站点。
+完整链路：**留住页面 → 取验证码图 → 弹输入框 → 页面内回填点击 → 等验证通过 → 取 HTML/UA → 收尾**。
+
+```javascript
+async _passCaptcha(url, session) {
+    // 1) 留住页面并注入 watcher：图片验证码模式
+    const finalUrl = await Webview.open(url, {
+        session,
+        mode: 'image',
+        captchaXpath: '//img[@id="captcha-img"]',     // 验证码图
+        inputXpath:   '//input[@id="captcha-input"]', // 回填目标（image 模式会先 focus 它）
+        buttonXpath:  '//button[@id="captcha-submit"]', // 提交按钮
+    });
+
+    // 2) 取验证码图（dataURL）。图片早到也不会丢（open 时已订阅）
+    let image = null;
+    try {
+        image = await Webview.awaitImage({ session, timeout: 30 });
+    } catch (e) {
+        // 没等到图：可能是点选式验证码（mode:'button'）或页面结构与规则不符；
+        // 也可能是跨域图未开 CORS → canvas taint（SecurityError），此时宿主只记日志不发图，
+        // 可退回 Webview.exec('document.querySelector("...").src') 取 URL 自己抓。
+        console.warn('[plugin] 未取到验证码图:', e.kind, e.message);
+    }
+
+    // 3) 让用户看图输入（image 传 dataURL，对话框会渲染出来）
+    const code = await Dialog.showInputDialog('请输入验证码', null, image);
+    if (!code) {
+        await Webview.close({ session, keepCookies: false }); // 用户取消：不保留 cookie
+        throw new Error('验证码已取消');
+    }
+
+    // 4) 把 code 填回页面里那个输入框并点提交（原生 setter，受控组件也认）
+    await Webview.fillAndClick({
+        session, code,
+        inputXpath:  '//input[@id="captcha-input"]',
+        buttonXpath: '//button[@id="captcha-submit"]',
+    });
+
+    // 5) 等验证通过（验证码元素消失 / 页面跳转 / 脚本 done）
+    await Webview.awaitGone({ session, timeout: 60 });
+
+    // 6) 取渲染后的 HTML 与 WebView 的真实 UA
+    const html = await Webview.getHtml({ session });
+    const userAgent = await Webview.getUserAgent({ session });
+
+    // 7) 收尾：keepCookies 默认 true —— 保留刚拿到的 clearance cookie 交给后续请求；
+    //    dispose 默认 false —— 实例按空闲窗口回收（想立刻销毁传 dispose:true）
+    await Webview.close({ session });
+
+    return { html, finalUrl, userAgent };
+}
+```
+
+之后请求验证后的页面时，**必须把 UA 与 cookie 一起带上**：
+
+```javascript
+const { html, userAgent } = await this._passCaptcha(pageUrl, 'cap');
+// 该 session 的 cookie 与请求侧共用同一份（Network.* 一般已自动带）
+const cookies = await Webview.cookies(pageUrl, 'cap');
+const body = await Network.get(nextUrl, {
+    'User-Agent': userAgent,   // ⚠️ 必须与 cookie 是同一个 UA
+    'Cookie': cookies,         // 可选：请求侧通常已自动注入
+});
+```
+
+> ⚠️ **UA 必须与 cookie 一起用于后续请求**：风控站点下发的 clearance cookie 与
+> WebView 的 User-Agent 绑定，只带 cookie 不带 UA（或换一个 UA）会立刻失效。
+>
+> ⚠️ **当前 wyw 的已知缺口**：请求侧（`Network.*`）**不会自动对齐** WebView 的 UA ——
+> 它只用默认值或插件显式传入的 `User-Agent`。因此 `Webview.getUserAgent()` 的结果必须由
+> 插件自己存下来，并在后续请求的 headers 里**显式**传（把 UA 与 cookie 当成一对使用）。
+> 宿主尚未做「WebView UA → 请求侧默认头」的自动对齐。
+>
+> - `Webview.close()` 的 `keepCookies` **默认 true**：平台 WebView Cookie 罐与**会话 cookie
+>   库**都保留，随后直接用 `Network.*` 即可带上；传 `false` 表示「这次验证的登录态一点都
+>   不留」—— 会话库**立即清空**（后续 `Network.*` / `Webview.cookies` 拿到空串），平台罐
+>   同时走 `dispose(clearCookies:true)`（Android / iOS / macOS；Windows 平台罐本身无按域
+>   清理、不一定真被清，但会话库一定会清）。
+> - 同一 `session` 上**避免**同时跑 `Network.getHtml`（一次性取页）与 `Webview.*`：
+>   两者是独立实例、不会互相打断，但会对同一站点建立两个 WebView 页面，可能让「留着的
+>   验证页」偏离预期状态。验证流程建议用专用 session（如 `'cap'`）。
+> - `awaitImage` / `awaitGone` 超时会 reject 结构化错误（`e.kind='webview'`）；插件应
+>   `try/catch` 并给出可读提示，别让验证码超时变成未捕获异常。
+
 ---
 
 ## 五、测试与调试
@@ -745,7 +1003,7 @@ getImageLoadingConfig(url, comicId, epId) {
 
    - **脚本协议**：必须定义 `class Test { run() { ... } }`；`run()` 返回普通值或 `Promise`（异步，90s 上限）。每次运行 `new Test()`，方法间无状态残留。默认编辑器里有 hello-world 示例。
    - **日志**：`log(msg, 'info'|'warn'|'error')` 与 `console.*` 都会进面板；`run()` 的返回值 JSON 序列化后以 `RET` 高亮展示（对象自动缩进格式化）。
-   - **能力**：`Network.get / getHtml / webview / cookies / sendRequest`、`HtmlDocument`、`Convert`、`Dialog`、`UI` 等全部可用。WebView 首次调用有初始化成本；单次默认 50s 超时、15s 空闲自动释放。
+   - **能力**：`Network.get / getHtml / webview / cookies / sendRequest`、`Webview.*`（交互式 WebView）、`HtmlDocument`、`Convert`、`Dialog`、`UI` 等全部可用。WebView 首次调用有初始化成本；单次默认 50s 超时、15s 空闲自动释放。
    - **内置回归测试**（`lib/pages/js_dev/tests/`，复制进编辑器点 ▶ 即跑）：
      - `test_webview_p0.js` — WebView `waitFor` + `finalUrl`（7 项）
      - `test_network_p1.js` — `extra`（timeout/retries/redirect）+ 结构化错误（7 项）
@@ -784,12 +1042,49 @@ getImageLoadingConfig(url, comicId, epId) {
 | 引擎不调用 `init()` | 初始化逻辑放实例字段 / getter / 构造 |
 | 封面只读 `src` | 懒加载：`data-original` > `data-src` > `src` |
 | `Network.get` 结果当 JSON 用 | 它是 body 字符串，需 `JSON.parse` |
+| **`Network.get` 结果取 `.status`/`.body`/`.headers`** | 它是**字符串**，这些恒为 `undefined`（判断会静默恒真/恒假）。要状态码/响应头请用 `Network.sendRequest()`（返回 `{status, headers, body}`） |
+| **`Network.fetchBytes` 结果当字节用** | 它返回 `{status, headers, body}`（**不是字节**），字节在 `.body`；`new Uint8Array(res)` 会得到空数组 → `DataView` 越界。venera 的 `fetchBytes` 才直接返回字节。`tools/check_plugins.js` 会静态拦截这两类「返回值形态」残留（精确到变量） |
+| **验证后只带 cookie、不带 WebView 的 UA** | clearance cookie 与 UA **绑定**：`Webview.getUserAgent()` 取到的 UA 必须与 cookie **成对**用于后续请求的 `User-Agent` 头，否则 cookie 立即失效。当前 wyw 请求侧**不会自动对齐** UA（见 4.9） |
+| **`Webview.*` 未 `open` 就调用** | `await` 会 reject 一个**结构化 Error**（`e.kind='webview'`、`e.retryable=false`），不是 `null` 也不会静默成功；插件应先 `open` 再 `exec/getHtml/awaitImage` 等，并用 `try/catch` 处理这类错误与超时 |
+| **`UI.Action` 的点击回调 `return` 卡片列表** | **返回值会被框架丢弃**（`lib/utils/plugin_action.dart` 只 `await plugin.invoke(...)`）→ 用户点了没反应。要做「点标签/按钮打开结果页」必须用 `Navigator.navigateToDescriptor(plugin, {method, args, title})` 打开新页面，由该方法返回内容 |
+| **`openReader` 里的 `plugin:` 字段、`sourceKey`、`PluginBrowse.open` 的第一个参数** | 必须是**插件名（= 文件名）**：框架按 `__plugins__.<文件名>` 挂载与查找。插件内写 `this.constructor.name` 即可（= 类名 = 文件名）；**不要**写 `this.key` —— 基类已经没有这个成员了（存储命名空间也由基类直接取 `this.constructor.name`） |
+| **`getImageLoadingConfig` 透传 async 方法的 Promise** | 必须 `await` 后再 `return` 对象；否则 Dart 侧 `if (raw is Map)` 判定失败 → 配置**静默丢弃**（图片鉴权/还原全失效）。该方法是 `async` 也合法（框架会 await） |
+| **读设置项后直接 `parseInt`/拼接** | wyw **未设置的项返回 `''`（空串）而非 `undefined`**：`parseInt('') = NaN` → 可能拼出 `https://undefined`。统一用 `isNaN()` 或空串判断兜底 |
 | 章节一次传全部图片 URL | 用惰性加载：`{id, title, plugin, method, args}` |
 | 图片 403（防盗链） | `UI.Image({..., headers: ...})` 或 `getImageLoadingConfig` 返回 headers |
 | `ExpansionTile.children` 传单个对象 | 必须是数组：`[UI.X({...})]` |
 | `Button.onTap` 传普通函数 | 必须是 `UI.Action` / `UI.Navigate` 描述符 |
 | `HtmlDocument` 不释放 | 用后 `doc.dispose()`（Map 有 GC 兜底） |
 | 请求被 Cloudflare 拦截 | `Network.getHtml(url)` 走 WebView 渲染 |
+| **异步 `getCategory()`** | **合法** —— 框架 `plugin.invoke` 会 await Promise。需要运行时才知道分类名（如从首页解析板块）时就用它 |
+| **用 `this.search` 调用自己的 search 方法** | 合法，但会被 `tools/check_plugins.js` 误判为「venera 的 search 对象式接口残留」。写成 `this['search'](...)` 可避免误报 |
+| **改了内置插件（`assets/plugin/*.js`）的代码，App 里却没变化** | 正常现象：出厂安装**只在插件目录为空时执行一次**，装完之后那些插件与你自己的插件完全一样，删了不会回来，改了包里的源码也不影响已装的那份。要么在插件详情页「代码」段直接改，要么把插件目录清空重来 |
+
+---
+
+## 六之二、从 venera 插件移植
+
+venera-configs 的插件与 wyw 是**结构性差异**（对象式接口 vs 方法式接口），不能靠脚本批量转换。
+完整的映射规则、逐个插件的适配记录、以及 Dart 侧缺口清单见
+**[venera-plugin-adaptation.md](venera-plugin-adaptation.md)**。
+
+几条最常踩的对应关系：
+
+| venera | wyw |
+|---|---|
+| `class X extends ComicSource` | `class X extends PluginSource`（类名 = 文件名） |
+| `this.category` / `this.categoryComics.load` / `optionLoader` | `getCategory()` / `loadCategory()` + `loadCategoryPage()` / `getCategoryOptions()` |
+| `this.search.load(keyword, options, page)` | `search(keyword, page)` |
+| `this.comic.loadInfo(id)` / `loadEp` / `onImageLoad` | `getDetail(id)` / `loadChapterImages` / `getImageLoadingConfig` |
+| `new Comic({...})` / `new ComicDetails({...})` | `UI.*` 描述符树 |
+| `UI.showMessage` / `UI.showDialog` | `Dialog.showToast` / `Dialog.showDialog` |
+| `explore = [{title, type, load}]` | **无对应页面** → 回收成 `getCategory()` 的一个分组（每个板块一个分类），否则入口静默丢失 |
+| `categoryComics.ranking` | 同上 → 回收成「排行榜」分组 |
+| `comic.onClickTag(ns, tag)` | **无对应机制** → 详情页把标签渲染成 `UI.Button(onTap: UI.Action({method:'searchTag', args:[ns,tag]}))`，插件内 `searchTag` 用 `navigator.navigateToDescriptor` 打开结果页 |
+| `account` / `favorites` / `comments` | wyw 无账号/收藏/评论 UI → 跳过（可在插件设置页用 `input` 项让用户填 token 作为降级） |
+
+> 移植后请跑 `node tools/check_plugins.js <插件名>` 做机械校验（语法 / 类名 / 继承 / 必需方法 /
+> venera 残留 / 未定义成员引用 / `init()` 接线 / `_explore` 未接线）。
 
 ---
 
@@ -859,7 +1154,7 @@ class myvideo extends PluginSource {
             videoId: this._playSources?.videoId || url,
             title: title || url,
             cover: cover || '',
-            sourceKey: this.key,
+            sourceKey: this.constructor.name,
             initialSource: 0,
             initialEpisode: 0,
             sources: this._playSources?.sources || [{
@@ -886,7 +1181,7 @@ class mycomic extends PluginSource {
 
     async search(keyword, page = 1) { /* ...返回 List<UI.Card>... */ }
 
-    async getDetail(id) { /* ...返回 List<UI>，最后 PluginBrowse.open(this.key, {id,title,cover,kv})... */ }
+    async getDetail(id) { /* ...返回 List<UI>，最后 PluginBrowse.open(this.constructor.name, {id,title,cover,kv})... */ }
 
     async openReader(epId) {
         let chapters = this._chapters.map(ep => ({

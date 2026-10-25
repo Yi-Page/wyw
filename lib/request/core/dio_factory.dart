@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 import 'package:wyw/request/core/dio_logger_interceptor.dart';
+import 'package:wyw/request/core/lenient_content_type_transformer.dart';
 import 'package:wyw/request/core/network_config.dart';
 import 'package:wyw/utils/http_headers.dart';
 
@@ -55,7 +56,7 @@ class DioFactory {
       ),
     );
     dio.httpClientAdapter = config.createAdapter();
-    dio.transformer = BackgroundTransformer();
+    dio.transformer = LenientContentTypeTransformer();
     dio.interceptors.addAll(interceptors);
     if (config.enableLog) {
       dio.interceptors.add(DioLoggerInterceptor());

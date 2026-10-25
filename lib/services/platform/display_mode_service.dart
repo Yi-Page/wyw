@@ -1,17 +1,19 @@
 import 'dart:io';
 
 import 'package:flutter/services.dart';
-import 'package:flutter/widgets.dart' show Orientation;
 import 'package:wyw/services/logging/log_tags.dart';
 import 'package:wyw/services/logging/logger.dart';
 import 'package:wyw/services/platform/platform_environment_service.dart';
-import 'package:wyw/utils/device.dart';
 import 'package:window_manager/window_manager.dart';
 
+/// 全屏 / 系统栏的开关。
+///
+/// **屏幕方向不在这里**：方向由 `ScreenOrientationService` 统一管理（唯一状态源），
+/// 这样按钮状态与真实生效策略不会脱节。
 class DisplayModeService {
   DisplayModeService._();
 
-  static Future<void> enterFullScreen({bool lockOrientation = true}) async {
+  static Future<void> enterFullScreen() async {
     if (Platform.isLinux || Platform.isMacOS || Platform.isWindows) {
       await windowManager.setFullScreen(true);
       return;
@@ -34,31 +36,16 @@ class DisplayModeService {
         // 用原生 WindowInsetsController 隐藏系统栏，比 SystemChrome 更可靠。
         await PlatformEnvironmentService.enterAndroidFullscreen();
       }
-      if (!lockOrientation) {
-        return;
-      }
-      await SystemChrome.setPreferredOrientations([
-        DeviceOrientation.portraitUp,
-        DeviceOrientation.landscapeLeft,
-        DeviceOrientation.landscapeRight,
-      ]);
       return;
     }
     // iOS 端启用沉浸式
     await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    if (!lockOrientation) {
-      return;
-    }
-    await SystemChrome.setPreferredOrientations([
-      DeviceOrientation.portraitUp,
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
-    ]);
   }
 
-  static Future<void> exitFullScreen({bool lockOrientation = true}) async {
+  static Future<void> exitFullScreen() async {
     if (Platform.isLinux || Platform.isMacOS || Platform.isWindows) {
       await windowManager.setFullScreen(false);
+      return;
     }
     // 安卓端退出播放页时恢复系统状态栏与导航栏
     if (Platform.isAndroid) {
@@ -68,9 +55,6 @@ class DisplayModeService {
     try {
       if (Platform.isIOS) {
         await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-        if (isCompact() && lockOrientation) {
-          await verticalScreen();
-        }
       }
     } catch (e, s) {
       WywLogger().e(
@@ -79,29 +63,5 @@ class DisplayModeService {
         stackTrace: s,
       );
     }
-  }
-
-  static Future<void> verticalScreen() async {
-    await SystemChrome.setPreferredOrientations([
-      DeviceOrientation.portraitUp,
-    ]);
-  }
-
-  /// 锁定屏幕方向为当前方向：横屏则锁定横屏，竖屏则锁定竖屏。
-  static Future<void> lockOrientation(Orientation orientation) async {
-    if (orientation == Orientation.landscape) {
-      await SystemChrome.setPreferredOrientations([
-        DeviceOrientation.landscapeLeft,
-        DeviceOrientation.landscapeRight,
-      ]);
-    } else {
-      await SystemChrome.setPreferredOrientations([
-        DeviceOrientation.portraitUp,
-      ]);
-    }
-  }
-
-  static Future<void> unlockScreenRotation() async {
-    await SystemChrome.setPreferredOrientations([]);
   }
 }

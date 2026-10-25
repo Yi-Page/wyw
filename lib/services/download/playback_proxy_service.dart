@@ -4,9 +4,20 @@
 //
 // 播放器请求走本代理（http://127.0.0.1:port/...），代理从源站拉取媒体数据，
 // 同时把字节落盘到 DownloadManager 同一套下载目录与文件命名
-// （seg_00000.ts / key_0.key / video.mp4），因此 DownloadManager 扫描
-// 「已存在分片」时会自动跳过代理已落盘的分片 —— 每分片只会从源站拉取一次，
-// 播放与下载共用同一条网络流，不产生双倍流量。
+// （seg_00000.ts / key_0.key），因此 DownloadManager 扫描「已存在分片」时会自动
+// 跳过代理已落盘的分片 —— 每分片只会从源站拉取一次，播放与下载共用同一条网络流，
+// 不产生双倍流量。
+//
+// **只支持 HLS 源**。合流要的是「播放进度即下载进度」，而进度能在两端共享，靠的是
+// 分片序列（两端同一套 `seg_00000.ts` 命名 + SegmentWriteCoordinator 的路径互斥，
+// 谁先拉谁落盘、另一个复用）。整段媒体（mp4 直链）没有分片，这条共享量根本不存在，
+// 所以**不提供**它的合流通道：调用方先用
+// [PlaybackProxyService.probeMediaKind] 判型，不是 HLS 就**不要**注册会话，改为
+// 直链直接播放（见 `video_controller` 里的合流降级）。
+//
+// 判型只看**内容**不看 URL 后缀（有源把 `.mp4` 当目录名，见
+// [classifyProxyMediaBytes]）；播放器一旦拿到与内容不匹配的地址就**直接打不开**，
+// 所以判型必须在注册会话之前完成，而不是等 `/m3u8` 拉下来才发现不对。
 
 import 'dart:async';
 import 'dart:convert';
@@ -16,7 +27,7 @@ import 'package:path/path.dart' as p;
 import 'package:wyw/request/clients/download_http_client.dart';
 import 'package:wyw/services/logging/log_tags.dart';
 import 'package:wyw/services/logging/logger.dart';
-import 'package:wyw/utils/m3u8_ad_filter.dart';
+import 'package:wyw/utils/http_headers.dart';
 import 'package:wyw/utils/m3u8_parser.dart';
 import 'package:wyw/utils/segment_file_coordinator.dart';
 
@@ -24,11 +35,47 @@ import 'package:wyw/utils/segment_file_coordinator.dart';
 typedef ProxyProgressCallback = void Function(String recordKey,
     int episodeNumber, int downloadedSegments, int totalSegments);
 
-/// 单个「播放即下载」会话的上下文。
+/// 源的媒体类型判定结果（合流源**必须**是 HLS 播放列表）。
+enum ProxyMediaKind {
+  /// 判不出结论（探测失败、响应过短）。**不等于**"可以合流"——调用方按
+  /// "不能合流"处理，因为挂上代理后拿到打不开的地址比直接播更糟。
+  unknown,
+
+  /// HLS 播放列表：唯一支持合流的源类型。
+  hlsPlaylist,
+
+  /// 整段媒体文件（mp4 直链等）：没有分片，不支持合流。
+  singleFile,
+}
+
+/// 用响应首段字节判断这是 HLS 播放列表还是整段媒体文件。
+///
+/// **只看内容、不看 URL 后缀**：同一批源里 `…/1080P_4000K_x.mp4/index-v1-a1.m3u8`
+/// 路径里带 `.mp4` 但其实是 TS 的 HLS（`.mp4` 只是它上一级目录名），反过来也有
+/// 直链完全不带后缀。判定口径与下载端一致（下载端用 `_fetchM3u8` 撞
+/// `_NotM3u8Exception` 再回退直链下载）：首段能认出 `#EXTM3U` 才算 HLS。
+///
+/// 首段不足 7 字节（`#EXTM3U` 的长度）返回 [ProxyMediaKind.unknown]：
+/// 这时候往哪边猜都可能错，交给调用方决定怎么提示。
+ProxyMediaKind classifyProxyMediaBytes(List<int> head) {
+  if (head.length < 7) return ProxyMediaKind.unknown;
+  // 播放列表是文本；首段可能切在多字节字符中间，用 allowMalformed 容错
+  // （这里只拿它比 ASCII 前缀 `#EXTM3U`，容错不影响结论）。
+  final text = utf8.decode(head, allowMalformed: true);
+  return text.replaceFirst('\uFEFF', '').trimLeft().startsWith('#EXTM3U')
+      ? ProxyMediaKind.hlsPlaylist
+      : ProxyMediaKind.singleFile;
+}
+
+/// 单个「播放即下载」会话的上下文（一个会话就是一份 HLS 源）。
 class PlaybackProxySession {
   final String recordKey;
   final int episodeNumber;
-  final String m3u8Url; // 解析后的最终媒体列表（直链 m3u8）
+
+  /// HLS 播放列表地址（**调用方必须先用 [PlaybackProxyService.probeMediaKind]
+  /// 确认过它是播放列表**，这里不再复查：整段媒体没有合流通道）。
+  final String m3u8Url;
+
   final String episodeDir; // 落盘目录（与 DownloadManager 一致）
   final Map<String, String> httpHeaders;
   final bool adBlockerEnabled;
@@ -76,6 +123,9 @@ class PlaybackProxyService {
   }
 
   /// 注册一个会话并返回其代理 m3u8 URL（给播放器使用）。
+  ///
+  /// **前置条件**：调用方已用 [probeMediaKind] 确认过这是 HLS 播放列表。
+  /// 整段媒体（mp4 直链）没有合流通道，拿它的地址注册只会让播放器打不开。
   String registerSession(PlaybackProxySession session) {
     _sessions[session.recordKey] = session;
     return proxyM3u8Url(session);
@@ -108,21 +158,45 @@ class PlaybackProxyService {
         session.recordKey;
   }
 
-  /// mp4 直链代理地址。
-  String proxyMp4Url(String src, String episodeDir,
-      Map<String, String> httpHeaders, String recordKey) {
-    final encSrc = Uri.encodeComponent(src);
-    final dir = Uri.encodeComponent(episodeDir);
-    final hdrs = Uri.encodeComponent(jsonEncode(httpHeaders));
-    return _baseUrl() +
-        '/mp4?src=' +
-        encSrc +
-        '&dir=' +
-        dir +
-        '&hdrs=' +
-        hdrs +
-        '&rk=' +
-        recordKey;
+  /// 拉取源站时用的默认请求头（随机 UA + 空 referer）。
+  ///
+  /// 判型与代理会话必须用**同一套**头：有 CDN 把签名绑在 UA 上，两处各随机一次
+  /// 就可能出现"判型能看到、真拉却 403"的错判。
+  static Map<String, String> defaultSourceHeaders() =>
+      <String, String>{'user-agent': getRandomUA(), 'referer': ''};
+
+  /// 判断这个源能不能作为合流源（**只有 HLS 播放列表可以**）。
+  ///
+  /// 只拉首段（最多 1KB，实际读到 64 字节就够）判型，原因见 [classifyProxyMediaBytes]。
+  /// 任何异常都返回 [ProxyMediaKind.unknown]，绝不抛出：判型失败不该让播放跟着失败，
+  /// 调用方按 unknown 走"降级为直链播放"，用户照样能看。
+  ///
+  /// 用 `Range` 只取开头是必须的：源站若忽略了 Range，这里读满 64 字节就
+  /// `break` 主动断开，不会为了判型把一个几百 MB 的 mp4 拉完。
+  Future<ProxyMediaKind> probeMediaKind(
+    String url, {
+    Map<String, String>? headers,
+  }) async {
+    try {
+      final resp = await DownloadHttpClient.instance.getStream(
+        url,
+        headers: {
+          ...(headers ?? defaultSourceHeaders()),
+          'Range': 'bytes=0-1023',
+        },
+        receiveTimeout: const Duration(seconds: 10),
+      );
+      final bytes = <int>[];
+      await for (final chunk in resp.data!.stream) {
+        bytes.addAll(chunk);
+        if (bytes.length >= 64) break;
+      }
+      return classifyProxyMediaBytes(bytes);
+    } catch (e, s) {
+      WywLogger().d('${LogTag.download} 合流源判型失败（按未知处理）url=$url',
+          error: e, stackTrace: s);
+      return ProxyMediaKind.unknown;
+    }
   }
 
   Future<void> _serve(HttpServer server) async {
@@ -152,8 +226,6 @@ class PlaybackProxyService {
       await _handleSegment(request, response);
     } else if (path == '/key') {
       await _handleKey(request, response);
-    } else if (path == '/mp4') {
-      await _handleMp4(request, response);
     } else {
       response.statusCode = HttpStatus.notFound;
       await response.close();
@@ -174,6 +246,8 @@ class PlaybackProxyService {
       return;
     }
 
+    final session = _sessions[recordKey];
+
     Map<String, dynamic> headers = {};
     try {
       headers = jsonDecode(hdrsJson) as Map<String, dynamic>;
@@ -192,6 +266,12 @@ class PlaybackProxyService {
       );
       final trimmed = content.trimLeft();
       if (!trimmed.startsWith('#EXTM3U')) {
+        // 判型说是播放列表、真拉下来却不是（源在探测之后换了内容，比如跟踪 URL
+        // 或签名跳转）。合流只支持 HLS，这里已经没有可用的降级通道——整段媒体
+        // 没有分片这条两端共享的进度量，所以明确失败并记日志，
+        // 而不是把整段 mp4 当播放列表喂给播放器。
+        WywLogger().e('${LogTag.download} 合流源不是 m3u8（判型与实际不符）'
+            ' src=$src rk=$recordKey');
         response.statusCode = HttpStatus.badGateway;
         response.write('not m3u8');
         await response.close();
@@ -223,24 +303,14 @@ class PlaybackProxyService {
         ),
       );
 
-      // 记录总分片数供进度显示
-      final session = _sessions[recordKey];
-      final bool adFilterEnabled = session?.adBlockerEnabled ?? false;
-
-      // 与 DownloadManager 一致：开启去广告时按 discontinuityGroup 过滤。
-      // 若不过滤，代理按「原 m3u8 索引」落盘 seg_<idx>.ts，而下载端按
-      // 「过滤后索引」落盘同名文件，两端错位会造成已播放分片在最终下载里
-      // 缺失/错位、重复下载。
-      List<M3u8Segment> segments = resolvedSegments;
-      if (adFilterEnabled) {
-        segments = M3u8AdFilter.filterAds(segments);
-      }
-      if (session != null) {
-        session.totalSegments = segments.length;
-      }
-      final double targetDuration = adFilterEnabled
-          ? M3u8AdFilter.calculateTargetDuration(segments)
-          : playlist.targetDuration;
+      // 广告过滤统一交给播放引擎（ffmpeg 的 hls_ad_filter）：代理只做地址重写，
+      // 分片集合与顺序一律保持原样，且必须把 #EXT-X-DISCONTINUITY 写回去
+      // （那是引擎侧过滤的启用条件）。代理按 idx=i 落盘 seg_<i>.ts，
+      // 下载端也按同一份列表的位置落盘同名文件，两端索引空间保持一致。
+      final List<M3u8Segment> segments = resolvedSegments;
+      // 记录总分片数供进度显示（session 在方法开头取出，判型与进度共用同一份）
+      session?.totalSegments = segments.length;
+      final double targetDuration = playlist.targetDuration;
 
       // 重写为代理地址
       final sb = StringBuffer();
@@ -254,6 +324,12 @@ class PlaybackProxyService {
       final keyIndexMap = <String, int>{};
       for (int i = 0; i < segments.length; i++) {
         final seg = segments[i];
+        // 分界线必须写回去：mpv/ffmpeg 侧的广告过滤（hls_ad_filter）靠这个标签
+        // 才启用，抹掉它等于把播放器那道兜底一起关掉。
+        if (i > 0 &&
+            seg.discontinuityGroup != segments[i - 1].discontinuityGroup) {
+          sb.writeln('#EXT-X-DISCONTINUITY');
+        }
         if (seg.key != lastKey) {
           if (seg.key != null) {
             if (!keyIndexMap.containsKey(seg.key!.uri)) {
@@ -454,148 +530,6 @@ class PlaybackProxyService {
     session.downloadedSegments = count;
     onProgress?.call(
         session.recordKey, session.episodeNumber, count, session.totalSegments);
-  }
-
-  // ---------- mp4 直链：Range 转发 + 追加落盘 ----------
-
-  Future<void> _handleMp4(HttpRequest request, HttpResponse response) async {
-    final src = request.uri.queryParameters['src'] ?? '';
-    final dir = request.uri.queryParameters['dir'] ?? '';
-    final hdrsJson = request.uri.queryParameters['hdrs'] ?? '{}';
-    final recordKey = request.uri.queryParameters['rk'] ?? '';
-    if (src.isEmpty || dir.isEmpty) {
-      response.statusCode = HttpStatus.badRequest;
-      await response.close();
-      return;
-    }
-
-    Map<String, dynamic> headers = {};
-    try {
-      headers = jsonDecode(hdrsJson) as Map<String, dynamic>;
-    } catch (e) {
-      WywLogger().d(
-          '${LogTag.download} hdrs JSON 解析失败，使用空 headers rk=$recordKey',
-          error: e);
-    }
-
-    final mp4Path = p.join(dir, 'video.mp4');
-    final file = File(mp4Path);
-    await file.create(recursive: true);
-
-    final rangeHeader = request.headers.value('range');
-    final bool isRangeRequest =
-        rangeHeader != null && rangeHeader.startsWith('bytes=');
-
-    // 播放器请求的字节起点（缺省从头开始）。
-    int requestedStart = 0;
-    if (isRangeRequest) {
-      requestedStart =
-          int.tryParse(rangeHeader.substring(6).split('-').first) ?? 0;
-    }
-
-    // 本地已落盘长度。mp4 代理始终以「追加到 EOF」方式落盘：
-    //  - 已落盘的 [0, fileLen) 内容是连续、有效的；
-    //  - 源站续传永远从 EOF 开始，保证磁盘文件连续、无空洞/错位。
-    int fileLen = 0;
-    if (await file.exists()) {
-      try {
-        fileLen = await file.length();
-      } catch (e) {
-        WywLogger().d('${LogTag.download} 读取 video.mp4 已落盘长度失败，按 0 续传 src=$src',
-            error: e);
-      }
-    }
-
-    try {
-      final stream = await DownloadHttpClient.instance.getStream(
-        src,
-        headers: {
-          ...headers,
-          'Range': 'bytes=' + fileLen.toString() + '-',
-        },
-      );
-      final totalStr = stream.data?.headers['content-range']?.toString() ?? '';
-      // content-range: bytes 0-999/1000
-      final slashIdx = totalStr.lastIndexOf('/');
-      final totalBytes = slashIdx > 0
-          ? int.tryParse(totalStr.substring(slashIdx + 1).trim()) ?? 0
-          : 0;
-
-      // 服务器忽略 Range（返回 200 全文）时，若本地已有字节，直接失败，
-      // 避免把整段内容重复追加进 video.mp4 破坏已落盘的播放进度。
-      if (fileLen > 0 &&
-          totalStr.isEmpty &&
-          (stream.statusCode ?? 0) != HttpStatus.partialContent) {
-        response.statusCode = HttpStatus.badGateway;
-        response.write('server ignored range request');
-        WywLogger().e('${LogTag.download} 源站忽略 Range，拒绝追加重复字节 '
-            'src=$src fileLen=$fileLen');
-        await response.close();
-        return;
-      }
-
-      response.statusCode =
-          isRangeRequest ? HttpStatus.partialContent : HttpStatus.ok;
-      response.headers.set('Content-Type', 'video/mp4');
-      response.headers.set('Accept-Ranges', 'bytes');
-      if (isRangeRequest) {
-        response.headers.set(
-            'Content-Range',
-            'bytes ' +
-                requestedStart.toString() +
-                '-' +
-                (totalBytes > 0 ? (totalBytes - 1).toString() : '') +
-                '/' +
-                totalBytes.toString());
-      }
-
-      // 播放器请求起点早于 EOF（回退/跳转到已下载区间）：
-      // 先从本地文件回读 [requestedStart, fileLen)，再继续向源站续传，
-      // 保证响应内容与请求的 Range 完全一致。
-      if (requestedStart < fileLen) {
-        final raf = await file.open(mode: FileMode.read);
-        try {
-          await raf.setPosition(requestedStart);
-          while (true) {
-            final chunk = await raf.read(64 * 1024);
-            if (chunk.isEmpty) break;
-            response.add(chunk);
-          }
-        } finally {
-          await raf.close();
-        }
-      }
-
-      final raf = await file.open(mode: FileMode.append);
-      try {
-        // 当前写指针始终从 EOF 增长；
-        // 当 requestedStart > fileLen（向前跳转到未下载区间）时，
-        // [fileLen, requestedStart) 的字节只落盘不转发（预填空洞），
-        // 之后的内容从 requestedStart 起完整转发给播放器。
-        int pos = fileLen;
-        await for (final chunk in stream.data!.stream) {
-          await raf.writeFrom(chunk);
-          final chunkStart = pos;
-          pos += chunk.length;
-          if (chunkStart + chunk.length <= requestedStart) continue;
-          final skip = requestedStart - chunkStart;
-          if (skip > 0) {
-            response.add(chunk.sublist(skip));
-          } else {
-            response.add(chunk);
-          }
-        }
-        await response.close();
-      } finally {
-        await raf.close();
-      }
-      _markSegmentDownloaded(recordKey);
-    } catch (e, s) {
-      WywLogger()
-          .e('${LogTag.download} mp4 代理转发失败 src=$src', error: e, stackTrace: s);
-      response.statusCode = HttpStatus.badGateway;
-      await response.close();
-    }
   }
 
   /// 停止代理并清理会话。

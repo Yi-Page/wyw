@@ -15,7 +15,7 @@ class GeneralEmptyState extends StatelessWidget {
   final IconData icon;
   final String title;
 
-  /// Optional second line, kept at secondary emphasis under [title].
+  /// 可选的第二行，副强调（wyw 扩展，搜索页在用；Kazumi 原版没有）。
   final String? subtitle;
   final List<Widget> actions;
   final bool compact;
@@ -46,36 +46,29 @@ class GeneralEmptyState extends StatelessWidget {
               ),
               SizedBox(height: compact ? 16 : 24),
               Semantics(
+                header: true,
                 liveRegion: true,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Semantics(
-                      header: true,
-                      child: Text(
-                        title,
-                        textAlign: TextAlign.center,
-                        style: (compact
-                                ? textTheme.titleMedium
-                                : textTheme.titleLarge)
-                            ?.copyWith(
-                          color: colorScheme.onSurface,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ),
-                    if (subtitle != null) ...[
-                      const SizedBox(height: 8),
-                      Text(
-                        subtitle!,
-                        textAlign: TextAlign.center,
-                        style: textTheme.bodyMedium
-                            ?.copyWith(color: colorScheme.onSurfaceVariant),
-                      ),
-                    ],
-                  ],
+                child: Text(
+                  title,
+                  textAlign: TextAlign.center,
+                  style:
+                      (compact ? textTheme.titleMedium : textTheme.titleLarge)
+                          ?.copyWith(
+                    color: colorScheme.onSurface,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
+              if (subtitle != null) ...[
+                SizedBox(height: compact ? 8 : 12),
+                Text(
+                  subtitle!,
+                  textAlign: TextAlign.center,
+                  style: textTheme.bodyMedium?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
               if (actions.isNotEmpty) ...[
                 SizedBox(height: compact ? 16 : 24),
                 Wrap(

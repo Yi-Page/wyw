@@ -25,13 +25,14 @@ class DownloadRecordAdapter extends TypeAdapter<DownloadRecord> {
       fields[5] as DateTime,
       videoId: fields[6] == null ? '' : fields[6] as String,
       sourceKey: fields[7] == null ? '' : fields[7] as String,
+      code: fields[8] == null ? '' : fields[8] as String,
     );
   }
 
   @override
   void write(BinaryWriter writer, DownloadRecord obj) {
     writer
-      ..writeByte(8)
+      ..writeByte(9)
       ..writeByte(0)
       ..write(obj.mediaId)
       ..writeByte(1)
@@ -47,7 +48,9 @@ class DownloadRecordAdapter extends TypeAdapter<DownloadRecord> {
       ..writeByte(6)
       ..write(obj.videoId)
       ..writeByte(7)
-      ..write(obj.sourceKey);
+      ..write(obj.sourceKey)
+      ..writeByte(8)
+      ..write(obj.code);
   }
 
   @override

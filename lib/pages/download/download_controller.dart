@@ -2,15 +2,23 @@
 
 import 'dart:async';
 
+import 'package:flutter_modular/flutter_modular.dart';
 import 'package:mobx/mobx.dart';
 import 'package:path/path.dart' as path;
+import 'package:wyw/modules/danmaku/danmaku_episode_response.dart';
 import 'package:wyw/modules/download/download_module.dart';
 import 'package:wyw/repositories/download_repository.dart';
+import 'package:wyw/repositories/i_history_repository.dart';
+import 'package:wyw/services/danmaku/danmaku_episode_matcher.dart';
 import 'package:wyw/services/download/background_download_service.dart';
 import 'package:wyw/services/download/download_manager.dart';
 import 'package:wyw/services/download/playback_proxy_service.dart';
+import 'package:wyw/services/danmaku/danmaku_cache_service.dart';
+import 'package:wyw/services/danmaku/danmaku_library_service.dart';
 import 'package:wyw/services/logging/logger.dart';
 import 'package:wyw/services/logging/log_tags.dart';
+import 'package:wyw/services/storage/history_progress.dart';
+import 'package:wyw/services/storage/history_type.dart';
 import 'package:wyw/services/storage/storage.dart';
 import 'package:wyw/utils/file_system.dart';
 import 'package:wyw/utils/http_headers.dart';
@@ -100,6 +108,11 @@ abstract class _DownloadController with Store {
     }
     _repository.updateEpisode(recordKey, episodeNumber, episode);
 
+    if (episode.status == DownloadStatus.completed) {
+      // 完成时顺手缓存一份弹幕供离线播放；异步且吞异常，不能影响下载结果。
+      unawaited(_cacheDanmakuForOffline(record, episode));
+    }
+
     final key = '${recordKey}_$episodeNumber';
 
     final isFinalState = episode.status == DownloadStatus.completed ||
@@ -118,6 +131,113 @@ abstract class _DownloadController with Store {
       _refreshRecord(recordKey);
       _queueBackgroundNotificationUpdate();
     }
+  }
+
+  /// 下载完成时把该集弹幕缓存到剧集目录，供离线播放使用。
+  ///
+  /// 弹幕库来自**进度记录**（`VideoPlaybackProgress.danmaku`，作品级选择，由
+  /// 「弹幕」tab 写入），再用纯函数 [matchLocalEpisodeToLibrary] 按集号在库的分集
+  /// 列表里对位。对不上就**静默跳过**：下载是后台行为，宁可这一集没有缓存，也
+  /// 不能猜错集把别人的弹幕写进用户的离线缓存（匹配记忆层已整体退场，不再有
+  /// "用户手选过的精确映射"可用，所以这里的对位只能是保守推导）。
+  ///
+  /// 失败只记日志 —— 弹幕缓存是附加能力，绝不能影响已经完成的下载。
+  Future<void> _cacheDanmakuForOffline(
+    DownloadRecord record,
+    DownloadEpisode episode,
+  ) async {
+    if (!GStorage.getSetting(SettingsKeys.downloadDanmaku)) return;
+    if (!DanmakuLibraryService.instance.isConfigured) return;
+
+    final directory = episode.downloadDirectory.trim();
+    if (directory.isEmpty) return;
+
+    final sourceId = record.effectiveCode;
+    if (sourceId.isEmpty) return;
+
+    // 已有缓存就不再重复抓：完成通知可能因恢复/刷新再次触发。
+    if (await DanmakuCacheService.instance.hasCache(directory)) return;
+
+    try {
+      final progress = _progressOf(sourceId);
+      final library = progress?.danmaku;
+      if (library == null) {
+        WywLogger().i(
+            '${LogTag.download} 该作品还没在「弹幕」tab 选过弹幕库，跳过弹幕缓存 '
+            'code=$sourceId');
+        return;
+      }
+
+      final detail = await DanmakuLibraryService.instance
+          .loadDetail(library.refreshableId);
+      final episodes = detail?.episodes ?? const <DanmakuEpisodeRef>[];
+      if (episodes.isEmpty) {
+        WywLogger().i(
+            '${LogTag.download} 弹幕库没有分集数据，跳过弹幕缓存 '
+            'id=${library.refreshableId}');
+        return;
+      }
+
+      // 本地集名优先取下载记录里的；为空时退回进度记录里插件给的名字。
+      final localName = episode.episodeName.isNotEmpty
+          ? episode.episodeName
+          : _episodeNameOf(progress!, episode);
+      final index = matchLocalEpisodeToLibrary(
+        localName: localName,
+        episodes: episodes,
+      );
+      if (index == null) {
+        WywLogger().i(
+            '${LogTag.download} 本地集名对不上库分集，跳过弹幕缓存 '
+            'name=$localName 库集数=${episodes.length}');
+        return;
+      }
+
+      final target = episodes[index];
+      final danmakus =
+          await DanmakuLibraryService.instance.loadComments(target.episodeId);
+      if (danmakus.isEmpty) return;
+
+      await DanmakuCacheService.instance.write(
+        directory: directory,
+        episodeId: target.episodeId,
+        libraryTitle: library.libraryTitle,
+        danmakus: danmakus,
+      );
+      WywLogger().i(
+          '${LogTag.download} 已缓存弹幕供离线播放 episode=${episode.episodeNumber} '
+          'name=$localName 库集=${target.episodeNumber} 条数=${danmakus.length}');
+    } catch (error) {
+      WywLogger().w(
+          '${LogTag.download} 缓存离线弹幕失败 episode=${episode.episodeNumber}',
+          error: error);
+    }
+  }
+
+  /// 按作品 code 查进度记录（拿其中的弹幕库条目与插件给的集名）。
+  VideoPlaybackProgress? _progressOf(String code) {
+    try {
+      final entry = inject<IHistoryRepository>()
+          .find(type: HistoryType.video, sourceId: code);
+      if (entry == null) return null;
+      return VideoPlaybackProgress.fromMap(entry.progress);
+    } catch (error) {
+      WywLogger().d('${LogTag.download} 读进度记录失败 code=$code', error: error);
+      return null;
+    }
+  }
+
+  /// 进度记录里这一集的展示名。
+  ///
+  /// 下载记录的 `episodeName` 为空时用它兜底：集名是"按集号对位"的唯一输入，
+  /// 少了它就只能跳过缓存。
+  String _episodeNameOf(VideoPlaybackProgress progress, DownloadEpisode episode) {
+    final sourceIndex = episode.sourceIndex;
+    if (sourceIndex < 0 || sourceIndex >= progress.sources.length) return '';
+    final episodes = progress.sources[sourceIndex].episodes;
+    final episodeIndex = episodeIndexOf(episode.episodeNumber);
+    if (episodeIndex < 0 || episodeIndex >= episodes.length) return '';
+    return episodes[episodeIndex].name;
   }
 
   void _queueBackgroundNotificationUpdate() {
@@ -252,6 +372,46 @@ abstract class _DownloadController with Store {
 
   DownloadRecord? getRecordSnapshot(String recordKey) => recordByKey[recordKey];
 
+  /// 按作品级 code 反查下载记录（进度记录与下载记录之间的引用方向）。
+  ///
+  /// code **不是**物理 key：物理 key 仍是 `<pluginName>_<mediaId>`（与既有
+  /// 数据完全兼容，所以不需要迁移）。因此这里按"记录自身派生的 code"
+  /// （[DownloadRecord.effectiveCode]）做全等比较：
+  ///   - 新记录直接比 `record.code`；
+  ///   - 老记录从 `sourceKey`/`videoId` 派生后比较 → 老记录同样能被找到。
+  /// 记录数很少（作品级），线性扫描成本可忽略。
+  DownloadRecord? findRecordByCode(String code) {
+    if (code.isEmpty) return null;
+    for (final record in records) {
+      if (record.effectiveCode == code) return record;
+    }
+    // 内存尚未装载（极端：init 之前）时回退到仓库。
+    if (records.isEmpty) {
+      for (final record in _repository.getAllRecords()) {
+        if (record.effectiveCode == code) return _cloneRecord(record);
+      }
+    }
+    return null;
+  }
+
+  /// 本作每集的下载任务，键为 `线路:集数`（0-based）——供选集面板回显下载状态。
+  ///
+  /// 等价于 Kazumi 在播放页里遍历 `downloadController.records` 构建 `downloads`
+  /// （那边以剧集页 URL 为键）；wyw 的 [DownloadEpisode] 带结构化线路/集数，
+  /// 故直接反解 episodeNumber 当键，无需再依赖 URL。
+  Map<String, DownloadEpisode> episodeDownloadsFor({required String code}) {
+    final out = <String, DownloadEpisode>{};
+    final record = findRecordByCode(code);
+    if (record == null) return out;
+    for (final entry in record.episodes.entries) {
+      out[episodeDownloadKey(
+        sourceIndexOf(entry.key),
+        episodeIndexOf(entry.key),
+      )] = entry.value;
+    }
+    return out;
+  }
+
   DownloadRecord _cloneRecord(DownloadRecord record) {
     return DownloadRecord(
       record.mediaId,
@@ -267,6 +427,7 @@ abstract class _DownloadController with Store {
       record.createdAt,
       videoId: record.videoId,
       sourceKey: record.sourceKey,
+      code: record.code,
     );
   }
 
@@ -316,54 +477,45 @@ abstract class _DownloadController with Store {
     return null;
   }
 
-  String? getLocalVideoPath(
-      int mediaId, String pluginName, int episodeNumber) {
-    final episode =
-        _repository.getEpisode(mediaId, pluginName, episodeNumber);
+  String? getLocalVideoPath(int mediaId, String pluginName, int episodeNumber) {
+    final episode = _repository.getEpisode(mediaId, pluginName, episodeNumber);
     return _downloadManager.getLocalVideoPath(episode);
   }
 
-  /// 按结构化身份（sourceKey+videoId+sourceIndex+episodeIndex）查下载剧集。
+  /// 按作品 code + 结构化下标查下载剧集。
   DownloadEpisode? findEpisodeByIdentity({
-    required String sourceKey,
-    required String videoId,
+    required String code,
     required int sourceIndex,
     required int episodeIndex,
   }) {
-    if (videoId.isEmpty) return null;
-    final plugin = sourceKey.isEmpty ? 'wyw' : sourceKey;
-    final mediaId = videoId.hashCode;
-    final record = _repository.getRecordByMediaId(mediaId, plugin);
+    final record = findRecordByCode(code);
     if (record == null) return null;
     return record.episodes[structuredEpisodeNumber(sourceIndex, episodeIndex)];
   }
 
-  /// 按结构化身份查已完成下载的本地文件路径。
+  /// 按作品 code + 结构化下标查已完成下载的本地文件路径。
   String? findLocalVideoPathByIdentity({
-    required String sourceKey,
-    required String videoId,
+    required String code,
     required int sourceIndex,
     required int episodeIndex,
   }) {
     final episode = findEpisodeByIdentity(
-      sourceKey: sourceKey,
-      videoId: videoId,
+      code: code,
       sourceIndex: sourceIndex,
       episodeIndex: episodeIndex,
     );
     return _downloadManager.getLocalVideoPath(episode);
   }
 
-  /// 按结构化身份判断是否存在进行中的下载任务（pending/resolving/downloading）。
+  /// 按作品 code + 结构化下标判断是否存在进行中的下载任务
+  /// （pending/resolving/downloading）。
   bool hasActiveDownloadByIdentity({
-    required String sourceKey,
-    required String videoId,
+    required String code,
     required int sourceIndex,
     required int episodeIndex,
   }) {
     final episode = findEpisodeByIdentity(
-      sourceKey: sourceKey,
-      videoId: videoId,
+      code: code,
       sourceIndex: sourceIndex,
       episodeIndex: episodeIndex,
     );
@@ -393,7 +545,10 @@ abstract class _DownloadController with Store {
 
   /// 启动「播放即下载」：注册代理会话并返回代理 URL（供播放器切换）。
   ///
-  /// [m3u8Url] 为已解析出的直链（.m3u8 或 .mp4）。
+  /// [m3u8Url] 必须是**已确认的 HLS 播放列表**（调用方先用
+  /// `PlaybackProxyService.probeMediaKind` 判型）。整段媒体（mp4 直链）没有合流
+  /// 通道：它没有分片，"播放进度即下载进度"这条两端共享的量不存在，注册上去只会
+  /// 让播放器拿到打不开的地址。
   /// 返回 null 表示任务不是媒体直链（无法走代理）。
   Future<String?> startProxyDownload({
     required int mediaId,
@@ -410,8 +565,7 @@ abstract class _DownloadController with Store {
       episodeNumber: episodeNumber,
       m3u8Url: m3u8Url,
       episodeDir: episodeDir,
-      httpHeaders: httpHeaders ??
-          <String, String>{'user-agent': getRandomUA(), 'referer': ''},
+      httpHeaders: httpHeaders ?? PlaybackProxyService.defaultSourceHeaders(),
       adBlockerEnabled: _repository.getForceAdBlocker(),
     );
     await PlaybackProxyService.instance.start();
@@ -422,29 +576,36 @@ abstract class _DownloadController with Store {
   }
 
   /// 结构化合流：按当前集身份查进行中任务，存在则启动代理合流。
+  ///
+  /// 这里是**挂代理的唯一咽喉**，所以判型也放在这里：只有 HLS 播放列表能走代理
+  /// （整段媒体没有分片，"播放进度即下载进度"这条共享量不存在，挂上去只会让播放器
+  /// 拿到打不开的地址）。不符合就**静默**返回 null —— 用户没明确要求合流时
+  /// （在线播放的"静默挂靠"）不该弹提示，按直链播就是对的；明确选了合流的那条
+  /// 路径由播放页提前判型并负责提示。
   Future<String?> maybeStartProxyForPlaybackByIdentity({
-    required String sourceKey,
-    required String videoId,
+    required String code,
     required int sourceIndex,
     required int episodeIndex,
     required String resolvedUrl,
   }) async {
     if (resolvedUrl.isEmpty) return null;
-    final episode = findEpisodeByIdentity(
-      sourceKey: sourceKey,
-      videoId: videoId,
-      sourceIndex: sourceIndex,
-      episodeIndex: episodeIndex,
-    );
+    final record = findRecordByCode(code);
+    if (record == null) return null;
+    final episode = record.episodes[
+        structuredEpisodeNumber(sourceIndex, episodeIndex)];
     if (episode == null) return null;
     if (episode.status == DownloadStatus.completed ||
         episode.status == DownloadStatus.failed ||
         episode.status == DownloadStatus.paused) {
       return null;
     }
-    final plugin = sourceKey.isEmpty ? 'wyw' : sourceKey;
-    final record = _repository.getRecordByMediaId(videoId.hashCode, plugin);
-    if (record == null) return null;
+    // 判型要在"确实要挂代理"之后做，避免没有任务的普通播放白跑一次探测。
+    final kind = await PlaybackProxyService.instance.probeMediaKind(resolvedUrl);
+    if (kind != ProxyMediaKind.hlsPlaylist) {
+      WywLogger().i('${LogTag.download} 源不是 HLS 播放列表（kind=${kind.name}），'
+          '不挂代理，按直链播放 resolvedUrl=$resolvedUrl');
+      return null;
+    }
     final episodeDir = episode.downloadDirectory.trim().isNotEmpty
         ? episode.downloadDirectory
         : await resolveEpisodeDir(
@@ -487,6 +648,7 @@ abstract class _DownloadController with Store {
   /// 入队（resolving → downloading），失败调用 [failPreparedEpisode]。
   /// 幂等：已完成任务保持不变，其余（重）置为 resolving。
   Future<void> prepareStructuredEpisode({
+    required String code,
     required String sourceKey,
     required String videoId,
     required String title,
@@ -496,23 +658,30 @@ abstract class _DownloadController with Store {
     required String episodeName,
     required String sourceName,
   }) async {
-    if (videoId.isEmpty) return;
+    if (code.isEmpty || videoId.isEmpty) return;
     final plugin = sourceKey.isEmpty ? 'wyw' : sourceKey;
     final mediaId = videoId.hashCode;
     final recordKey = '${plugin}_$mediaId';
     final episodeNumber = structuredEpisodeNumber(sourceIndex, episodeIndex);
 
-    final record = _repository.getRecord(recordKey) ??
-        DownloadRecord(
-          mediaId,
-          title,
-          cover,
-          plugin,
-          {},
-          DateTime.now(),
-          videoId: videoId,
-          sourceKey: sourceKey,
-        );
+    var record = _repository.getRecord(recordKey);
+    if (record == null) {
+      record = DownloadRecord(
+        mediaId,
+        title,
+        cover,
+        plugin,
+        {},
+        DateTime.now(),
+        videoId: videoId,
+        sourceKey: sourceKey,
+        code: code,
+      );
+    } else if (record.code.isEmpty) {
+      // 老记录惰性补 code：补上之后反向（下载 → 进度）查询即可工作。
+      record.code = code;
+      await _repository.putRecord(record);
+    }
 
     final existing = record.episodes[episodeNumber];
     if (existing != null) {
@@ -557,14 +726,12 @@ abstract class _DownloadController with Store {
 
   /// 解析失败：将预创建的任务标记为失败（下载页可见原因）。
   Future<void> failPreparedEpisode({
-    required String sourceKey,
-    required String videoId,
+    required String code,
     required int sourceIndex,
     required int episodeIndex,
     required String message,
   }) async {
-    final plugin = sourceKey.isEmpty ? 'wyw' : sourceKey;
-    final record = _repository.getRecordByMediaId(videoId.hashCode, plugin);
+    final record = findRecordByCode(code);
     if (record == null) return;
     final episodeNumber = structuredEpisodeNumber(sourceIndex, episodeIndex);
     final episode = record.episodes[episodeNumber];
@@ -577,15 +744,49 @@ abstract class _DownloadController with Store {
         '${LogTag.download} 下载前解析失败 episodeNumber=$episodeNumber recordKey=${record.key} reason=$message');
   }
 
+  /// 撤销 [prepareStructuredEpisode] 预创建的任务（合流判型发现源不支持时调用）。
+  ///
+  /// 为什么是"撤掉"而不是像 [failPreparedEpisode] 那样标失败：用户在这一集上并
+  /// **没有**下过载（只是选了合流，而合流不支持这个源），留一张"失败"卡片是在
+  /// 报一个不存在的事故。这里把它整个摘掉，下载页保持干净。
+  ///
+  /// 只动还没开始下载的任务：状态不是 `resolving` 就原样返回，避免把用户真正
+  /// 在下的（或已完成）任务误删。
+  Future<void> discardPreparedEpisode({
+    required String code,
+    required int sourceIndex,
+    required int episodeIndex,
+  }) async {
+    final record = findRecordByCode(code);
+    if (record == null) return;
+    final episodeNumber = structuredEpisodeNumber(sourceIndex, episodeIndex);
+    final episode = record.episodes[episodeNumber];
+    if (episode == null) return;
+    if (episode.status != DownloadStatus.resolving) {
+      WywLogger().i(
+          '${LogTag.download} 撤销预创建任务时状态已不是 resolving（保持原样）'
+          ' recordKey=${record.key} episodeNumber=$episodeNumber '
+          'status=${episode.status}');
+      return;
+    }
+    await _repository.deleteEpisode(record.key, episodeNumber);
+    _refreshRecord(record.key);
+    WywLogger().i(
+        '${LogTag.download} 已撤销预创建的合流任务 recordKey=${record.key} '
+        'episodeNumber=$episodeNumber');
+  }
+
   /// 下载结构化选集里的一集（幂等：同身份已存在则更新；已完成则跳过）。
   ///
   /// 下载不负责解析：[resolvedUrl] 必须是调用方经解析服务得到的**最终媒体
   /// 直链**（m3u8/mp4）。任务创建即进入 downloading，无 resolving 中间态。
   ///
+  /// [code] 作品级身份（进度记录 sourceId，写入记录供反向查询）；
   /// [sourceKey] 插件 key（空→'wyw'）；[videoId] 结构化视频 id；
   /// [sourceIndex]/[episodeIndex] 线路/集数（均 0-based）。
   /// 返回 true 表示任务已成功入队（或该集已完成）。
   Future<bool> downloadStructuredEpisode({
+    required String code,
     required String sourceKey,
     required String videoId,
     required String title,
@@ -596,23 +797,30 @@ abstract class _DownloadController with Store {
     required String sourceName,
     required String resolvedUrl,
   }) async {
-    if (videoId.isEmpty || resolvedUrl.isEmpty) return false;
+    if (code.isEmpty || videoId.isEmpty || resolvedUrl.isEmpty) return false;
     final plugin = sourceKey.isEmpty ? 'wyw' : sourceKey;
     final mediaId = videoId.hashCode;
     final recordKey = '${plugin}_$mediaId';
     final episodeNumber = structuredEpisodeNumber(sourceIndex, episodeIndex);
 
-    final record = _repository.getRecord(recordKey) ??
-        DownloadRecord(
-          mediaId,
-          title,
-          cover,
-          plugin,
-          {},
-          DateTime.now(),
-          videoId: videoId,
-          sourceKey: sourceKey,
-        );
+    var record = _repository.getRecord(recordKey);
+    if (record == null) {
+      record = DownloadRecord(
+        mediaId,
+        title,
+        cover,
+        plugin,
+        {},
+        DateTime.now(),
+        videoId: videoId,
+        sourceKey: sourceKey,
+        code: code,
+      );
+    } else if (record.code.isEmpty) {
+      // 老记录惰性补 code：补上之后反向（下载 → 进度）查询即可工作。
+      record.code = code;
+      await _repository.putRecord(record);
+    }
 
     final existing = record.episodes[episodeNumber];
     if (existing != null) {
@@ -762,8 +970,7 @@ abstract class _DownloadController with Store {
   Future<void> cancelDownload(
       int mediaId, String pluginName, int episodeNumber) async {
     final recordKey = '${pluginName}_$mediaId';
-    final episode =
-        _repository.getEpisode(mediaId, pluginName, episodeNumber);
+    final episode = _repository.getEpisode(mediaId, pluginName, episodeNumber);
     _downloadManager.cancel(recordKey, episodeNumber);
     await _downloadManager.deleteEpisodeFiles(
       mediaId,
@@ -800,8 +1007,7 @@ abstract class _DownloadController with Store {
     final recordKey = '${pluginName}_$mediaId';
     _downloadManager.cancel(recordKey, episodeNumber);
     _speeds.remove('${recordKey}_$episodeNumber');
-    final episode =
-        _repository.getEpisode(mediaId, pluginName, episodeNumber);
+    final episode = _repository.getEpisode(mediaId, pluginName, episodeNumber);
     await _downloadManager.deleteEpisodeFiles(
       mediaId,
       pluginName,

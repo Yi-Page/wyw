@@ -223,7 +223,8 @@ class DownloadEpisodeTile extends StatelessWidget {
   final String statusText;
   final List<Widget> actions;
 
-  /// Non-null only for completed episodes; makes the whole row tappable.
+  /// Non-null when tapping the row should open the player: 已完成（本地播放），
+  /// 以及**进行中/已暂停且有直链**（从下载页进「边下边播」）。
   final VoidCallback? onPlay;
 
   /// 集数显示名：`线路名 · 集名`（线路名/集名缺失时回退到反解集号）。

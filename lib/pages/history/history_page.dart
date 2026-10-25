@@ -5,100 +5,76 @@ import 'package:wyw/bean/appbar/app_bar_menu_button.dart';
 import 'package:wyw/bean/appbar/sys_app_bar.dart';
 import 'package:wyw/bean/card/history_card.dart';
 import 'package:wyw/bean/widget/empty_state_widget.dart';
+import 'package:wyw/bean/widget/kazumi_menu.dart';
 import 'package:wyw/bean/card/network_img_layer.dart';
-import 'package:wyw/bean/card/plugin_history_card.dart';
 import 'package:wyw/bean/dialog/dialog_helper.dart';
-import 'package:wyw/navigation.dart';
 import 'package:wyw/pages/history/history_controller.dart';
+import 'package:wyw/pages/history/history_deleted_dialog.dart';
 import 'package:wyw/pages/history/history_entry_launcher.dart';
-import 'package:wyw/pages/history/plugin_history_controller.dart';
+import 'package:wyw/pages/history/history_progress_summary.dart';
 import 'package:wyw/services/storage/history_entry.dart';
 import 'package:wyw/services/storage/history_progress.dart';
 import 'package:wyw/services/storage/history_type.dart';
-import 'package:wyw/services/storage/plugin_history_entry.dart';
-import 'package:wyw/utils/constants.dart';
 import 'package:wyw/utils/date_time.dart';
+import 'package:wyw/utils/deleted_ledger.dart';
 
-/// 历史页顶部 Tab。
-enum HistoryTab { progress, browse }
-
-/// 合并版历史页：进度历史（视频/漫画/小说）+ 插件浏览历史，单页 Tab 切换。
+/// 进度历史页（应用自带资源的观看/阅读进度）。
 ///
-/// 两个 tab 共有能力：
+/// 插件浏览历史已整体移入收藏模块（收藏页的「全部」tab），本页只保留进度历史，
+/// 两个历史互不耦合。
+///
+/// 页面能力：
 ///   - 标题搜索（实时过滤当前列表）
 ///   - 时间分组（今天/昨天/本周/本月/更早）
 ///   - 懒加载分页（滚动到底自动追加，避免一次全量渲染）
 ///   - 单条滑动删除 + Snackbar 撤销
-/// 进度 tab 额外：类型筛选 chips + 「继续观看」置顶横滑区。
-/// 横滑区能滑时只滑列表，滑到尽头继续拖拽则翻 Tab（解决与 TabBarView 的同向手势冲突）。
+///   - 类型筛选 chips + 「继续观看」置顶横滑区
 class HistoryPage extends StatefulWidget {
-  const HistoryPage({super.key, this.initialTab = HistoryTab.progress});
-
-  final HistoryTab initialTab;
+  const HistoryPage({super.key});
 
   @override
   State<HistoryPage> createState() => _HistoryPageState();
 }
 
-class _HistoryPageState extends State<HistoryPage>
-    with TickerProviderStateMixin {
+class _HistoryPageState extends State<HistoryPage> {
   static const int _pageSize = 30;
   static const int _pageStep = 40;
   static const int _continueLimit = 8;
 
   HistoryController get _progressController => inject<HistoryController>();
-  PluginHistoryController get _browseController =>
-      inject<PluginHistoryController>();
 
-  late final TabController _tabController;
   final TextEditingController _searchController = TextEditingController();
 
   bool _progressShowDelete = false;
-  bool _browseShowDelete = false;
 
-  // Tab 嵌套横滑冲突处理（见 _handleTabEdgeOverscroll）：
-  // 内层横滑列表手动拖拽过界的累计量 / 方向（+1 末边，-1 起始边）/ 本轮拖拽是否允许翻页
-  static const double _edgeFlipThreshold = 48;
-  double _edgeAccum = 0;
-  int _edgeDir = 0;
-  bool _edgeArmed = false;
+  /// 本次已删除清单（会话级回收站）：存活到本页 dispose，不持久化、不加上限。
+  ///
+  /// 删除**已经落盘**，这里只是"还来得及反悔"的窗口——比原来的 4 秒 SnackBar
+  /// 长，且连续删除不会互相顶掉撤销机会。
+  final DeletedLedger<HistoryEntry> _deleted =
+      DeletedLedger<HistoryEntry>(keyOf: (entry) => entry.key);
 
   // 视图状态：搜索词 / 类型筛选 / 分页可见数
   String _query = '';
   HistoryType? _typeFilter;
   int _progressVisible = _pageSize;
-  int _browseVisible = _pageSize;
 
   @override
   void initState() {
     super.initState();
     _progressController.init();
-    _browseController.init();
-    _tabController = TabController(
-      length: 2,
-      initialIndex: widget.initialTab == HistoryTab.browse ? 1 : 0,
-      vsync: this,
-    );
-    _tabController.addListener(() {
-      // 只在真正切换完成时刷新 AppBar 上下文动作
-      if (!_tabController.indexIsChanging && mounted) setState(() {});
-    });
   }
 
   @override
   void dispose() {
-    _tabController.dispose();
     _searchController.dispose();
     super.dispose();
   }
-
-  bool get _isProgressTab => _tabController.index == 0;
 
   void _setQuery(String value) {
     setState(() {
       _query = value;
       _progressVisible = _pageSize;
-      _browseVisible = _pageSize;
     });
   }
 
@@ -106,34 +82,26 @@ class _HistoryPageState extends State<HistoryPage>
   Widget build(BuildContext context) {
     return Observer(
       builder: (context) {
-        final hasProgress = _progressController.histories.isNotEmpty;
-        final hasBrowse = _browseController.histories.isNotEmpty;
-        final hasData = _isProgressTab ? hasProgress : hasBrowse;
-        final showDelete =
-            _isProgressTab ? _progressShowDelete : _browseShowDelete;
+        final hasData = _progressController.histories.isNotEmpty;
         return Scaffold(
           appBar: SysAppBar(
             title: const Text('历史'),
             actions: [
+              _buildDeletedButton(),
               if (hasData)
                 IconButton(
-                  onPressed: () => setState(() {
-                    if (_isProgressTab) {
-                      _progressShowDelete = !_progressShowDelete;
-                    } else {
-                      _browseShowDelete = !_browseShowDelete;
-                    }
-                  }),
-                  icon: showDelete
+                  onPressed: () => setState(
+                      () => _progressShowDelete = !_progressShowDelete),
+                  icon: _progressShowDelete
                       ? const Icon(Icons.edit_off_outlined)
                       : const Icon(Icons.edit_outlined),
-                  tooltip: showDelete ? '退出编辑' : '编辑',
+                  tooltip: _progressShowDelete ? '退出编辑' : '编辑',
                 ),
               if (hasData)
                 IconButton(
                   onPressed: _showClearDialog,
                   icon: const Icon(Icons.delete_sweep_outlined),
-                  tooltip: '清除当前列表',
+                  tooltip: '清除进度历史',
                 ),
               const WywAppBarMenuButton(pagePath: '/history/'),
             ],
@@ -142,20 +110,8 @@ class _HistoryPageState extends State<HistoryPage>
             bottom: false,
             child: Column(
               children: [
-                _buildSearchField(),
-                TabBar(
-                  controller: _tabController,
-                  tabs: const [Tab(text: '进度'), Tab(text: '浏览')],
-                ),
-                Expanded(
-                  child: NotificationListener<ScrollNotification>(
-                    onNotification: _handleTabEdgeOverscroll,
-                    child: TabBarView(
-                      controller: _tabController,
-                      children: [_buildProgressTab(), _buildBrowseTab()],
-                    ),
-                  ),
-                ),
+                _buildSearchRow(),
+                Expanded(child: _buildProgressTab()),
               ],
             ),
           ),
@@ -164,89 +120,99 @@ class _HistoryPageState extends State<HistoryPage>
     );
   }
 
-  // ============ 搜索 ============
+  // ============ 搜索 + 类型筛选 ============
 
-  Widget _buildSearchField() {
+  /// 一行：左侧搜索框（与收藏页同款 `SearchBar`），右侧类型筛选按钮（默认「全部」）。
+  ///
+  /// 宽度与列表一致走 `_horizontalPadding`（800 内容限宽居中），否则搜索框会
+  /// 撑满整个窗口、类型按钮被顶到最右。
+  Widget _buildSearchRow() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
-      child: TextField(
-        controller: _searchController,
-        onChanged: _setQuery,
-        decoration: InputDecoration(
-          isDense: true,
-          hintText: '搜索历史记录',
-          prefixIcon: const Icon(Icons.search, size: 20),
-          suffixIcon: _query.isEmpty
-              ? null
-              : IconButton(
-                  icon: const Icon(Icons.clear, size: 18),
-                  onPressed: () {
-                    _searchController.clear();
-                    _setQuery('');
-                  },
-                ),
-          border: const OutlineInputBorder(
-            borderRadius: BorderRadius.all(Radius.circular(10)),
-          ),
-          contentPadding:
-              const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
-        ),
+      padding: EdgeInsets.fromLTRB(
+        12 + _horizontalPadding,
+        6,
+        12 + _horizontalPadding,
+        2,
+      ),
+      child: Row(
+        children: [
+          Expanded(child: _buildSearchBar()),
+          const SizedBox(width: 8),
+          _buildTypeFilterButton(),
+        ],
       ),
     );
   }
 
-  // ============ Tab 嵌套横滑冲突 ============
+  Widget _buildSearchBar() => Semantics(
+        label: '搜索历史记录',
+        child: SearchBar(
+          controller: _searchController,
+          leading: const Icon(Icons.search_rounded, size: 22),
+          trailing: [
+            if (_query.isNotEmpty)
+              IconButton(
+                tooltip: '清除搜索',
+                onPressed: () {
+                  _searchController.clear();
+                  _setQuery('');
+                },
+                icon: const Icon(Icons.close_rounded),
+              ),
+          ],
+          elevation: const WidgetStatePropertyAll(0),
+          backgroundColor: WidgetStatePropertyAll(
+            Theme.of(context).colorScheme.surfaceContainerLow,
+          ),
+          padding: const WidgetStatePropertyAll(
+            EdgeInsets.symmetric(horizontal: 16),
+          ),
+          constraints: const BoxConstraints(minHeight: 48),
+          onChanged: _setQuery,
+          onSubmitted: (_) => FocusManager.instance.primaryFocus?.unfocus(),
+        ),
+      );
 
-  /// 「继续观看」/ 类型筛选 chips 是 TabBarView 内的横滑 ListView，手势竞技场中
-  /// 最内层滚动视图永远优先：这两块区域会抢走全部横向手势，滑到尽头再滑是"死区"，
-  /// 无法翻 tab。这里监听内层列表的手动拖拽过界（Android 为 OverscrollNotification，
-  /// iOS bounce 为 pixels 越界的 ScrollUpdateNotification），累计超过阈值即翻页；
-  /// 只认手指拖拽产生的过界（dragDetails 非空），惯性甩到边缘不触发，避免误翻。
-  bool _handleTabEdgeOverscroll(ScrollNotification n) {
-    if (n.metrics.axis != Axis.horizontal) return false;
-    if (n is ScrollStartNotification) {
-      _edgeAccum = 0;
-      _edgeDir = 0;
-      _edgeArmed = true;
-      return false;
-    }
-    double out;
-    int dir;
-    if (n is OverscrollNotification && n.dragDetails != null) {
-      out = n.overscroll.abs();
-      dir = n.overscroll.isNegative ? -1 : 1;
-    } else if (n is ScrollUpdateNotification && n.dragDetails != null) {
-      final m = n.metrics;
-      if (m.pixels > m.maxScrollExtent) {
-        out = m.pixels - m.maxScrollExtent;
-        dir = 1;
-      } else if (m.pixels < m.minScrollExtent) {
-        out = m.minScrollExtent - m.pixels;
-        dir = -1;
-      } else {
-        return false;
-      }
-    } else {
-      return false;
-    }
-    if (_edgeDir != dir) {
-      // 拖拽方向翻转：重新累计
-      _edgeDir = dir;
-      _edgeAccum = out;
-    } else {
-      _edgeAccum += out;
-    }
-    if (_edgeArmed && _edgeAccum >= _edgeFlipThreshold) {
-      _edgeArmed = false;
-      final target = _tabController.index + dir;
-      if (target >= 0 && target < _tabController.length) {
-        _tabController.animateTo(target);
-      }
-    }
-    return false;
+  /// 类型筛选按钮（全部 / 视频 / 漫画 / 小说），当前值显示在按钮上。
+  Widget _buildTypeFilterButton() {
+    final options = <HistoryType?>[
+      null,
+      HistoryType.video,
+      HistoryType.comic,
+      HistoryType.novel,
+    ];
+    final label =
+        _typeFilter == null ? '全部' : historyTypeLabel(_typeFilter!);
+    return KazumiMenuButton(
+      menuChildren: [
+        for (final option in options)
+          KazumiMenuItem(
+            label: option == null ? '全部' : historyTypeLabel(option),
+            leadingIcon: Icon(
+              option == null
+                  ? Icons.filter_list_rounded
+                  : historyTypeIcon(option),
+            ),
+            selected: _typeFilter == option,
+            onPressed: () => _setTypeFilter(option),
+          ),
+      ],
+      builder: (context, toggle) => FilledButton.tonalIcon(
+        onPressed: toggle,
+        icon: const Icon(Icons.filter_list_rounded, size: 18),
+        label: Text(label),
+      ),
+    );
   }
 
-  // ============ 进度 tab ============
+  void _setTypeFilter(HistoryType? type) {
+    setState(() {
+      _typeFilter = type;
+      _progressVisible = _pageSize;
+    });
+  }
+
+  // ============ 进度列表 ============
 
   Widget _buildProgressTab() {
     return Observer(
@@ -274,10 +240,9 @@ class _HistoryPageState extends State<HistoryPage>
           },
           child: CustomScrollView(
             slivers: [
-              SliverToBoxAdapter(child: _buildTypeFilterChips()),
               if (continueList.isNotEmpty)
                 SliverToBoxAdapter(child: _buildContinueSection(continueList)),
-              // 某分类/搜索无结果时保留筛选 chips，仅正文区显示空态，避免无法切回「全部」
+              // 类型筛选在顶部的搜索行里（默认「全部」），正文区只处理空态。
               if (groups.isEmpty)
                 SliverFillRemaining(
                   hasScrollBody: false,
@@ -289,18 +254,16 @@ class _HistoryPageState extends State<HistoryPage>
                   SliverPadding(
                     padding:
                         EdgeInsets.symmetric(horizontal: _horizontalPadding),
-                    sliver: SliverGrid(
-                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                        mainAxisSpacing: 2,
-                        crossAxisSpacing: StyleString.cardSpace,
-                        crossAxisCount: _crossCount,
-                        mainAxisExtent: 136,
-                      ),
+                    // 单列分组列表（照 Kazumi 重构后的历史页）：同一日期分组视觉上
+                    // 并成一块——首行上圆角、末行下圆角、中间行小圆角，行间 2px 缝。
+                    sliver: SliverList(
                       delegate: SliverChildBuilderDelegate(
                         (context, i) => ProgressHistoryCardV(
                           historyItem: g.$2[i],
                           showDelete: _progressShowDelete,
                           onDeleted: () => _deleteProgress(g.$2[i]),
+                          borderRadius: _groupRowShape(i, g.$2.length),
+                          margin: _groupRowMargin,
                         ),
                         childCount: g.$2.length,
                       ),
@@ -329,38 +292,6 @@ class _HistoryPageState extends State<HistoryPage>
       if (q.isNotEmpty && !e.title.toLowerCase().contains(q)) return false;
       return true;
     }).toList();
-  }
-
-  Widget _buildTypeFilterChips() {
-    final options = <(HistoryType?, String)>[
-      (null, '全部'),
-      (HistoryType.video, '视频'),
-      (HistoryType.comic, '漫画'),
-      (HistoryType.novel, '小说'),
-    ];
-    return SizedBox(
-      height: 44,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        padding: EdgeInsets.symmetric(horizontal: 12 + _horizontalPadding),
-        children: [
-          for (final o in options)
-            Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: ChoiceChip(
-                label: Text(o.$2),
-                selected: _typeFilter == o.$1,
-                showCheckmark: false,
-                visualDensity: VisualDensity.compact,
-                onSelected: (_) => setState(() {
-                  _typeFilter = o.$1;
-                  _progressVisible = _pageSize;
-                }),
-              ),
-            ),
-        ],
-      ),
-    );
   }
 
   // ============ 继续观看置顶区 ============
@@ -445,7 +376,7 @@ class _HistoryPageState extends State<HistoryPage>
 
   Widget _buildContinueCard(HistoryEntry entry) {
     final theme = Theme.of(context);
-    final subtitle = _continueSubtitle(entry);
+    final subtitle = historyProgressSummary(entry);
     return GestureDetector(
       onTap: () {
         if (!mounted) return;
@@ -486,125 +417,34 @@ class _HistoryPageState extends State<HistoryPage>
     );
   }
 
-  String? _continueSubtitle(HistoryEntry e) {
-    final p = e.parseProgress();
-    switch (e.type) {
-      case HistoryType.video:
-        if (p is! VideoPlaybackProgress) return null;
-        final ep = p.currentEpisode;
-        if (ep == null) return null;
-        final epLabel = '第 ${p.lastEpisodeIndex + 1} 集';
-        if (ep.durationMs > 0) return '$epLabel · ${_formatMs(ep.positionMs)}';
-        return epLabel;
-      case HistoryType.comic:
-        if (p is! ComicProgress) return null;
-        if (p.chapters.isEmpty) return null;
-        final idx = HistoryEntryLauncher.comicChapterIndex(p);
-        return '第 ${idx + 1}/${p.chapters.length} 话';
-      case HistoryType.novel:
-        if (p is! ReadProgress) return null;
-        if (p.chapters.isEmpty) return null;
-        return '第 ${p.chapter}/${p.chapters.length} 章';
-      default:
-        return null;
-    }
-  }
-
-  String _formatMs(int ms) {
-    final s = (ms / 1000).round();
-    final m = s ~/ 60;
-    final sec = s % 60;
-    return '$m:${sec.toString().padLeft(2, '0')}';
-  }
-
-  // ============ 浏览 tab ============
-
-  Widget _buildBrowseTab() {
-    return Observer(
-      builder: (_) {
-        final all = _browseController.histories;
-        if (all.isEmpty) {
-          return _emptyView(Icons.history_rounded, '没有浏览历史');
-        }
-        final q = _query.trim().toLowerCase();
-        final filtered = q.isEmpty
-            ? all.toList()
-            : all.where((e) => e.title.toLowerCase().contains(q)).toList();
-        final visible = filtered.take(_browseVisible).toList();
-        final groups =
-            groupByTimeLabel<PluginHistoryEntry>(visible, (e) => e.visitTime);
-
-        return NotificationListener<ScrollNotification>(
-          onNotification: (n) {
-            if (n.metrics.axis != Axis.vertical) return false;
-            if (_browseVisible < filtered.length &&
-                n.metrics.pixels >= n.metrics.maxScrollExtent - 400) {
-              setState(() => _browseVisible += _pageStep);
-            }
-            return false;
-          },
-          child: CustomScrollView(
-            slivers: [
-              // 搜索无结果时正文区显示空态（搜索框在页面顶部，不受影响）
-              if (groups.isEmpty)
-                SliverFillRemaining(
-                  hasScrollBody: false,
-                  child: _emptyView(Icons.search_off, '未找到匹配的记录'),
-                )
-              else ...[
-                for (final g in groups) ...[
-                  SliverToBoxAdapter(child: _buildGroupHeader(g.$1)),
-                  SliverPadding(
-                    padding:
-                        EdgeInsets.symmetric(horizontal: _horizontalPadding),
-                    sliver: SliverGrid(
-                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                        mainAxisSpacing: 2,
-                        crossAxisSpacing: StyleString.cardSpace,
-                        crossAxisCount: _crossCount,
-                        mainAxisExtent: 136,
-                      ),
-                      delegate: SliverChildBuilderDelegate(
-                        (context, i) => PluginHistoryCard(
-                          historyItem: g.$2[i],
-                          showDelete: _browseShowDelete,
-                          onDeleted: () => _deleteBrowse(g.$2[i]),
-                        ),
-                        childCount: g.$2.length,
-                      ),
-                    ),
-                  ),
-                ],
-                SliverToBoxAdapter(
-                  child: _buildListFooter(
-                    hasMore: _browseVisible < filtered.length,
-                    shown: visible.length,
-                    total: filtered.length,
-                  ),
-                ),
-              ],
-            ],
-          ),
-        );
-      },
-    );
-  }
-
   // ============ 通用部件 ============
 
-  int get _crossCount {
-    final w = MediaQuery.sizeOf(context).width;
-    if (w > LayoutBreakpoint.medium['width']!) return 3;
-    if (w > LayoutBreakpoint.compact['width']!) return 2;
-    return 1;
-  }
-
   double get _horizontalPadding {
-    const maxContentWidth = 1000.0;
+    const maxContentWidth = 800.0;
     final screenWidth = MediaQuery.sizeOf(context).width;
     return screenWidth > maxContentWidth
         ? (screenWidth - maxContentWidth) / 2
         : 0;
+  }
+
+  /// 分组块内的行间距：卡片上下各 1px → 相邻行之间 2px 缝（照 Kazumi）。
+  static const EdgeInsets _groupRowMargin =
+      EdgeInsets.symmetric(vertical: 1, horizontal: 8);
+
+  /// 分组块内某一行的圆角（照 Kazumi）：首行上圆角、末行下圆角、中间行小圆角。
+  ///
+  /// 同一日期分组因此视觉上并成一整块；组只有一行时四角都是大圆角。
+  static BorderRadius _groupRowShape(int index, int total) {
+    const outer = Radius.circular(24);
+    const inner = Radius.circular(4);
+    final isFirst = index == 0;
+    final isLast = index == total - 1;
+    return BorderRadius.only(
+      topLeft: isFirst ? outer : inner,
+      topRight: isFirst ? outer : inner,
+      bottomLeft: isLast ? outer : inner,
+      bottomRight: isLast ? outer : inner,
+    );
   }
 
   Widget _buildGroupHeader(String label) {
@@ -657,34 +497,57 @@ class _HistoryPageState extends State<HistoryPage>
 
   // ============ 删除 / 清除 ============
 
+  /// 「已删除」入口：数量角标 + 点击打开弹窗；清单为空时禁用（置灰可见）。
+  Widget _buildDeletedButton() {
+    final count = _deleted.count;
+    return IconButton(
+      tooltip: count == 0 ? '本次已删除（无）' : '本次已删除（$count 条，可恢复）',
+      onPressed: count == 0 ? null : _openDeletedDialog,
+      icon: Badge.count(
+        count: count,
+        isLabelVisible: count > 0,
+        child: const Icon(Icons.restore_from_trash_rounded),
+      ),
+    );
+  }
+
   void _deleteProgress(HistoryEntry entry) {
     _progressController.remove(entry);
-    _showUndoSnackBar(
-        '已删除「${entry.title}」', () => _progressController.restore(entry));
+    setState(() => _deleted.add(entry));
   }
 
-  void _deleteBrowse(PluginHistoryEntry entry) {
-    _browseController.remove(entry);
-    _showUndoSnackBar(
-        '已删除「${entry.title}」', () => _browseController.restore(entry));
+  Future<void> _openDeletedDialog() async {
+    if (_deleted.isEmpty) return;
+    await showHistoryDeletedDialog(
+      context,
+      entries: _deleted.entries,
+      onRestore: _restoreFromLedger,
+      onRestoreAll: _restoreAllFromLedger,
+      onClear: () {
+        if (mounted) setState(_deleted.clear);
+      },
+    );
+    if (mounted) setState(() {});
   }
 
-  /// 单条删除后的撤销提示（4 秒内可撤销）。
-  void _showUndoSnackBar(String message, Future<void> Function() onUndo) {
-    rootScaffoldMessengerKey.currentState
-      ?..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Text(message, maxLines: 1, overflow: TextOverflow.ellipsis),
-          duration: const Duration(seconds: 4),
-          action: SnackBarAction(label: '撤销', onPressed: () => onUndo()),
-        ),
-      );
+  Future<void> _restoreFromLedger(HistoryEntry entry) async {
+    await _progressController.restore(entry);
+    if (!mounted) return;
+    setState(() => _deleted.remove(entry));
+    WywDialog.showToast(message: '已恢复「${entry.title}」');
   }
 
-  /// 清除当前 tab 全部记录：输入「清除」二次确认（不可撤销，需防误触）。
+  Future<void> _restoreAllFromLedger(List<HistoryEntry> entries) async {
+    for (final entry in entries) {
+      await _progressController.restore(entry);
+    }
+    if (!mounted) return;
+    setState(_deleted.clear);
+    WywDialog.showToast(message: '已恢复 ${entries.length} 条');
+  }
+
+  /// 清除进度历史：输入「清除」二次确认（删除后可在「已删除」中恢复）。
   void _showClearDialog() {
-    final isProgress = _isProgressTab;
     WywDialog.show(
       builder: (dialogContext) {
         final textController = TextEditingController();
@@ -692,12 +555,14 @@ class _HistoryPageState extends State<HistoryPage>
           builder: (context, setDialogState) {
             final confirmed = textController.text.trim() == '清除';
             return AlertDialog(
-              title: Text(isProgress ? '清除进度历史' : '清除浏览历史'),
+              title: const Text('清除进度历史'),
               content: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('将删除该列表的全部记录，且无法撤销。'),
+                  const Text('将删除全部进度记录。'),
+                  const SizedBox(height: 4),
+                  const Text('删除后可在顶栏「已删除」中恢复（离开本页后失效）。'),
                   const SizedBox(height: 12),
                   const Text('输入「清除」以确认：'),
                   const SizedBox(height: 8),
@@ -719,13 +584,15 @@ class _HistoryPageState extends State<HistoryPage>
                   onPressed: confirmed
                       ? () {
                           WywDialog.dismiss();
-                          if (isProgress) {
-                            _progressController.clearAll();
-                            setState(() => _progressVisible = _pageSize);
-                          } else {
-                            _browseController.clearAll();
-                            setState(() => _browseVisible = _pageSize);
-                          }
+                          // 清空由仓库内部完成 → 先取快照，再落盘删除，
+                          // 这样被清掉的条目同样能进「已删除」清单。
+                          final removed =
+                              _progressController.histories.toList();
+                          _progressController.clearAll();
+                          setState(() {
+                            _deleted.addAll(removed);
+                            _progressVisible = _pageSize;
+                          });
                         }
                       : null,
                   child: Text('清除',

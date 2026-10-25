@@ -1,14 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_modular/flutter_modular.dart';
+import 'package:wyw/bean/dialog/dialog_helper.dart';
 import 'package:wyw/bean/widget/empty_state_widget.dart';
 import 'package:wyw/bean/widget/error_widget.dart';
 import 'package:wyw/bean/widget/loading_indicator.dart';
+import 'package:wyw/bean/widget/select_field.dart';
 import 'package:wyw/pages/descriptor/descriptor_page.dart';
 import 'package:wyw/pages/plugin/plugin_controller.dart';
-
-/// 空字符串筛选选项（如「全部」value=""）在 DropdownButton 中的内部占位符：
-/// DropdownButton 把空串当"未选择"导致不显示选中项，这里用不可见字符代替，选中后再映射回空串。
-const String _emptyOptionSentinel = '\u0000';
+import 'package:wyw/utils/constants.dart';
 
 /// 分类浏览视图（无 Scaffold，可嵌入 tab 页或独立页面）。
 ///
@@ -33,12 +32,17 @@ class CategoryBrowseView extends StatefulWidget {
   State<CategoryBrowseView> createState() => _CategoryBrowseViewState();
 }
 
-class _CategoryBrowseViewState extends State<CategoryBrowseView> {
+class _CategoryBrowseViewState extends State<CategoryBrowseView>
+    with AutomaticKeepAliveClientMixin {
   final PluginController _plugins = inject<PluginController>();
 
   Map<String, dynamic>? _categoryData;
   bool _loading = true;
   String? _error;
+
+  /// 切走再切回时不重建不重拉：分类数据只在首次可见时加载一次。
+  @override
+  bool get wantKeepAlive => true;
 
   @override
   void initState() {
@@ -52,7 +56,7 @@ class _CategoryBrowseViewState extends State<CategoryBrowseView> {
       _error = null;
     });
     final plugin = _plugins.getPlugin(widget.pluginName);
-    if (plugin == null || !plugin.isRegistered) {
+    if (plugin == null || !plugin.isLoaded) {
       if (!mounted) return;
       setState(() {
         _loading = false;
@@ -81,7 +85,7 @@ class _CategoryBrowseViewState extends State<CategoryBrowseView> {
     List<dynamic>? optionGroups;
     try {
       final plugin = _plugins.getPlugin(widget.pluginName);
-      if (plugin != null && plugin.isRegistered) {
+      if (plugin != null && plugin.isLoaded) {
         final raw = await plugin.invoke('getCategoryOptions', [category]);
         if (raw is List && raw.isNotEmpty) {
           optionGroups = raw.cast<dynamic>();
@@ -111,154 +115,25 @@ class _CategoryBrowseViewState extends State<CategoryBrowseView> {
   }
 
   /// 弹出筛选选择框（支持 input 和 dropdown 两种类型）。返回选中值列表，取消返回 null。
+  ///
+  /// 走项目统一弹层通道 [WywDialog]（root navigator + 全局上下文兜底），
+  /// 与搜索页「最近搜索」弹层同款，不再直接调裸 `showDialog`。
   Future<List<String>?> _showOptionsDialog(
     String category,
     List<dynamic> groups,
-  ) async {
-    // 初始化每个组的默认值
-    final values = <String>[
-      for (final g in groups)
-        if (g is Map)
-          if ((g['type']?.toString() ?? '') == 'input')
-            '' // input 类型默认空字符串
-          else if ((g['options'] as List?)?.isNotEmpty == true)
-            // dropdown 类型默认第一个选项的值
-            (g['options'] as List).first is Map
-                ? ((g['options'] as List).first as Map)['value'].toString()
-                : ''
-          else
-            ''
-        else
-          '',
-    ];
-
-    // 用于存储 TextField 的控制器
-    final controllers = <TextEditingController>[
-      for (int i = 0; i < groups.length; i++)
-        if (groups[i] is Map &&
-            (groups[i]['type']?.toString() ?? '') == 'input')
-          TextEditingController(text: values[i])
-        else
-          TextEditingController(), // 占位，不会使用
-    ];
-
-    return showDialog<List<String>>(
+  ) {
+    return WywDialog.show<List<String>>(
       context: context,
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (ctx, setState) {
-            return AlertDialog(
-              title: Text('筛选 · $category'),
-              content: ConstrainedBox(
-                constraints: BoxConstraints(
-                  maxHeight: MediaQuery.of(ctx).size.height * 0.7,
-                ),
-                child: SingleChildScrollView(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      for (var i = 0; i < groups.length; i++)
-                        if (groups[i] is Map) ...[
-                          Align(
-                            alignment: Alignment.centerLeft,
-                            child: Text(
-                              (groups[i] as Map)['label']?.toString() ?? '',
-                              style: Theme.of(ctx).textTheme.labelMedium,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          if ((groups[i] as Map)['type']?.toString() == 'input')
-                            // 输入框类型
-                            TextField(
-                              controller: controllers[i],
-                              cursorColor:
-                                  Theme.of(context).colorScheme.primary,
-                              decoration: InputDecoration(
-                                floatingLabelBehavior:
-                                    FloatingLabelBehavior.never,
-                                hintText: '输入搜索内容',
-                                contentPadding: const EdgeInsets.symmetric(
-                                  vertical: 8,
-                                  horizontal: 12,
-                                ),
-                                border: const OutlineInputBorder(
-                                  borderRadius:
-                                      BorderRadius.all(Radius.circular(8)),
-                                ),
-                              ),
-                              onChanged: (text) {
-                                values[i] = text;
-                              },
-                            )
-                          else
-                            // 下拉选择类型
-                            DropdownButton<String>(
-                              // 空串值（如「全部」value=""）用占位符，避免被当成"未选择"而显示空白
-                              value: values[i].isEmpty
-                                  ? _emptyOptionSentinel
-                                  : values[i],
-                              isExpanded: true,
-                              items: [
-                                for (final o in ((groups[i] as Map)['options']
-                                        as List?) ??
-                                    const [])
-                                  if (o is Map)
-                                    DropdownMenuItem(
-                                      value: o['value'].toString().isEmpty
-                                          ? _emptyOptionSentinel
-                                          : o['value'].toString(),
-                                      child: Text(
-                                        o['text']?.toString() ??
-                                            o['value'].toString(),
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                    ),
-                              ],
-                              onChanged: (v) {
-                                setState(() {
-                                  values[i] = (v == null)
-                                      ? values[i]
-                                      : (v == _emptyOptionSentinel ? '' : v);
-                                });
-                              },
-                            ),
-                          const SizedBox(height: 12),
-                        ],
-                    ],
-                  ),
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('取消'),
-                ),
-                TextButton(
-                  onPressed: () {
-                    // 收集所有值（input 从 controller 获取最新值）
-                    final result = <String>[];
-                    for (int i = 0; i < groups.length; i++) {
-                      if (groups[i] is Map &&
-                          (groups[i]['type']?.toString() ?? '') == 'input') {
-                        result.add(controllers[i].text);
-                      } else {
-                        result.add(values[i]);
-                      }
-                    }
-                    Navigator.pop(ctx, result);
-                  },
-                  child: const Text('确定'),
-                ),
-              ],
-            );
-          },
-        );
-      },
+      builder: (_) => _CategoryOptionsDialog(
+        category: category,
+        groups: groups,
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // AutomaticKeepAliveClientMixin 必需
     if (_loading) {
       return const Center(child: LoadingIndicator());
     }
@@ -306,6 +181,163 @@ class _CategoryBrowseViewState extends State<CategoryBrowseView> {
               ],
             ),
           ],
+      ],
+    );
+  }
+}
+
+/// 分类筛选弹窗（`getCategoryOptions()` 返回的分组表单）。
+///
+/// 改造前这里是「label + TextField / 裸 DropdownButton」的临时拼装：
+///   - 输入框是圆角 8 的 outlined、下拉却是 M3 默认下划线的无边框控件，
+///     行高、内边距、边框三者完全不同，同一列里风格割裂；
+///   - 下拉还要靠 `'\u0000'` 哨兵值绕开 `DropdownButton` 的「空串 = 未选择」语义
+///     （否则「全部」这类 `value: ''` 的选项显示为空白）。
+///
+/// 现在两种类型共用同一套排版与小节标签，下拉改用 `SelectField`
+/// （与输入框同款 outlined 外观，且原生支持 `''` 作为合法选项值）。
+///
+/// 拆成独立 `StatefulWidget`（而非原来的 `StatefulBuilder` + 闭包变量）的原因：
+/// `TextEditingController` 现在有真正的属主，随弹窗销毁一并 dispose，
+/// 不再每次弹窗都泄漏一批控制器。
+class _CategoryOptionsDialog extends StatefulWidget {
+  const _CategoryOptionsDialog({
+    required this.category,
+    required this.groups,
+  });
+
+  final String category;
+  final List<dynamic> groups;
+
+  @override
+  State<_CategoryOptionsDialog> createState() => _CategoryOptionsDialogState();
+}
+
+class _CategoryOptionsDialogState extends State<_CategoryOptionsDialog> {
+  /// 每个分组的文本控制器（仅 `input` 类型使用）与当前选中值（`dropdown` 类型）。
+  final List<TextEditingController> _controllers = [];
+  final List<String> _values = [];
+
+  static Map _mapOf(dynamic group) =>
+      group is Map ? group : const <String, dynamic>{};
+
+  static bool _isInput(Map group) => group['type']?.toString() == 'input';
+
+  Map _mapAt(int index) => _mapOf(widget.groups[index]);
+
+  @override
+  void initState() {
+    super.initState();
+    for (final group in widget.groups) {
+      final map = _mapOf(group);
+      final options = (map['options'] as List?) ?? const [];
+      // dropdown 默认选中第一项；input 与无选项分组默认空串。
+      // 注意：`''` 是合法选项值（如「全部」），这里不需要任何占位哨兵。
+      final initial =
+          !_isInput(map) && options.isNotEmpty && options.first is Map
+              ? (options.first as Map)['value'].toString()
+              : '';
+      _values.add(initial);
+      _controllers.add(TextEditingController(text: initial));
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final controller in _controllers) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  List<SelectOption<String>> _optionsAt(int index) {
+    final options = (_mapAt(index)['options'] as List?) ?? const [];
+    return [
+      for (final option in options)
+        if (option is Map)
+          SelectOption<String>(
+            value: option['value'].toString(),
+            label: option['text']?.toString() ?? option['value'].toString(),
+          ),
+    ];
+  }
+
+  /// 收集最终值：input 以输入框实时文本为准，其余取下拉选中值。
+  List<String> _collect() => [
+        for (var i = 0; i < widget.groups.length; i++)
+          _isInput(_mapAt(i)) ? _controllers[i].text : _values[i],
+      ];
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final colorScheme = Theme.of(context).colorScheme;
+
+    // 分组顺序渲染：小节标签 → 控件；组间统一 16 间距。
+    final fields = <Widget>[];
+    for (var i = 0; i < widget.groups.length; i++) {
+      if (widget.groups[i] is! Map) continue;
+      if (fields.isNotEmpty) fields.add(const SizedBox(height: 16));
+      fields.add(
+        Text(
+          _mapAt(i)['label']?.toString() ?? '',
+          style: textTheme.labelMedium?.copyWith(
+            color: colorScheme.onSurfaceVariant,
+          ),
+        ),
+      );
+      fields.add(const SizedBox(height: 6));
+      fields.add(
+        _isInput(_mapAt(i))
+            ? TextField(
+                controller: _controllers[i],
+                cursorColor: colorScheme.primary,
+                decoration: const InputDecoration(
+                  floatingLabelBehavior: FloatingLabelBehavior.never,
+                  hintText: '输入搜索内容',
+                  isDense: true,
+                  contentPadding: StyleString.fieldContentPadding,
+                  border: OutlineInputBorder(
+                    borderRadius: StyleString.controlBorderRadius,
+                  ),
+                ),
+              )
+            : SelectField<String>(
+                value: _values[i],
+                options: _optionsAt(i),
+                onChanged: (value) => setState(() => _values[i] = value),
+              ),
+      );
+    }
+
+    return AlertDialog(
+      title: Text('筛选 · ${widget.category}'),
+      content: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * 0.7,
+        ),
+        // 稳定下限宽度：筛选项数量随分类变化时，AlertDialog 会按内容收缩成不同宽度，
+        // 弹窗忽宽忽窄很扎眼，这里给一个下限把它钉住。
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minWidth: 240),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: fields,
+            ),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(context, _collect()),
+          child: const Text('确定'),
+        ),
       ],
     );
   }

@@ -1,5 +1,7 @@
 // ignore_for_file: library_private_types_in_public_api
 
+import 'dart:convert';
+
 import 'package:mobx/mobx.dart';
 import 'package:wyw/js/script_engine.dart';
 
@@ -56,6 +58,51 @@ abstract class _JsDevController with Store {
   }
 
   void clear() => lines.clear();
+
+  /// 把所有日志行格式化为纯文本（级别标签 + 时间戳 + 内容），
+  /// 供「一键复制日志」/ 回贴给开发者排查使用。
+  String buildLogText() {
+    final buffer = StringBuffer();
+    for (final line in lines) {
+      final tag = switch (line.kind) {
+        JsLogKind.info => 'INFO',
+        JsLogKind.warn => 'WARN',
+        JsLogKind.error => 'ERROR',
+        JsLogKind.header => 'HEAD',
+        JsLogKind.returnValue => 'RET',
+        JsLogKind.stack => 'STCK',
+      };
+      final t = line.timestamp;
+      final time = t == null
+          ? ''
+          : '${t.hour.toString().padLeft(2, '0')}:'
+              '${t.minute.toString().padLeft(2, '0')}:'
+              '${t.second.toString().padLeft(2, '0')}.'
+              '${t.millisecond.toString().padLeft(3, '0')}';
+      final prefix = time.isEmpty ? '[$tag] ' : '[$tag] $time ';
+      buffer.writeln('$prefix${_formatLogText(line.text)}');
+    }
+    return buffer.toString();
+  }
+
+  /// 与页面展示一致的返回值格式化（JSON 缩进 / 原样字符串）。
+  String _formatLogText(dynamic v) {
+    if (v == null) return 'null';
+    if (v is num || v is bool) return v.toString();
+    if (v is String) {
+      try {
+        final decoded = json.decode(v);
+        return const JsonEncoder.withIndent('  ').convert(decoded);
+      } catch (_) {
+        return v;
+      }
+    }
+    try {
+      return const JsonEncoder.withIndent('  ').convert(v);
+    } catch (_) {
+      return v.toString();
+    }
+  }
 }
 
 enum JsLogKind { info, warn, error, header, returnValue, stack }
@@ -70,7 +117,7 @@ class JsLogLine {
       LogLevel.warn => JsLogKind.warn,
       LogLevel.error => JsLogKind.error,
     };
-    return JsLogLine(kind, e.message, timestamp: DateTime.now());
+    return JsLogLine(kind, e.message, timestamp: e.timestamp);
   }
 
   factory JsLogLine.header(String s) => JsLogLine(JsLogKind.header, s);

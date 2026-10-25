@@ -67,8 +67,6 @@ class _ComicReaderScaffoldState extends State<_ComicReaderScaffold> {
     });
   }
 
-  bool? rotation;
-
   void update() {
     setState(() {});
   }
@@ -101,7 +99,12 @@ class _ComicReaderScaffoldState extends State<_ComicReaderScaffold> {
           left: 0,
           right: 0,
           height: kTopBarHeight + MediaQuery.of(context).padding.top,
-          child: buildTop(),
+          // 顶栏整体兼作窗口拖动区：桌面端原生标题栏默认隐藏
+          // （DesktopWindowConfig.showWindowButton 默认 false），阅读器里没有
+          // 拖动区就完全移不动窗口。与视频页 / 播放页顶栏用的是同一套
+          // DragToMoveArea；它是 translucent 的，点击仍照旧下传（点空白收起
+          // 顶栏、点按钮生效），移动端不注册手势，行为不变。
+          child: dtb.DragToMoveArea(child: buildTop()),
         ),
         AnimatedPositioned(
           duration: const Duration(milliseconds: 180),
@@ -188,8 +191,7 @@ class _ComicReaderScaffoldState extends State<_ComicReaderScaffold> {
   Widget buildBottom() {
     final reader = context.reader;
     // 显示规范单位（章内图片序号）：一屏两张时是 2/4/6，不是屏号 1/2/3
-    final displayImage =
-        reader.frontierImage > 0 ? reader.frontierImage : 1;
+    final displayImage = reader.frontierImage > 0 ? reader.frontierImage : 1;
     var text = 'E${reader.chapter} : P$displayImage';
     if (reader.chapters.isEmpty) {
       text = 'P$displayImage';
@@ -207,41 +209,37 @@ class _ComicReaderScaffoldState extends State<_ComicReaderScaffold> {
           ),
         ),
       if (Platform.isAndroid)
-        Tooltip(
-          message: '屏幕旋转',
-          child: IconButton(
-            icon: Icon(
-              rotation == null
-                  ? Icons.screen_rotation
-                  : rotation == false
-                      ? Icons.screen_lock_portrait
-                      : Icons.screen_lock_landscape,
-            ),
-            onPressed: () {
-              if (rotation == null) {
-                setState(() {
-                  rotation = false;
-                });
-                SystemChrome.setPreferredOrientations([
-                  DeviceOrientation.portraitUp,
-                  DeviceOrientation.portraitDown,
-                ]);
-              } else if (rotation == false) {
-                setState(() {
-                  rotation = true;
-                });
-                SystemChrome.setPreferredOrientations([
-                  DeviceOrientation.landscapeLeft,
-                  DeviceOrientation.landscapeRight,
-                ]);
-              } else {
-                setState(() {
-                  rotation = null;
-                });
-                SystemChrome.setPreferredOrientations(DeviceOrientation.values);
-              }
-            },
-          ),
+        ListenableBuilder(
+          listenable: ScreenOrientationService.instance,
+          builder: (context, _) {
+            final orientation = ScreenOrientationService.instance;
+            final policy = orientation.policy;
+            final side = orientation.landscapeSide;
+            return Tooltip(
+              message: orientationPolicyTooltip(policy, side),
+              child: KazumiMenuButton(
+                builder: (context, toggle) => IconButton(
+                  icon: Icon(orientationPolicyIcon(policy)),
+                  onPressed: toggle,
+                ),
+                menuChildren: [
+                  for (final item in orientationPolicyMenuItems(policy, side))
+                    KazumiMenuItem(
+                      label: item.label,
+                      leadingIcon: Icon(item.icon),
+                      selected: item.selected,
+                      requestFocusOnHover: false,
+                      onPressed: () => unawaited(
+                        orientation.updateActivePolicy(
+                          item.policy,
+                          side: item.side,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            );
+          },
         ),
       Tooltip(
         message: '自动翻页',
@@ -1022,8 +1020,7 @@ class _SelectImageOverlayContentState
                     Icon(Icons.info_outline,
                         size: 18, color: colorScheme.onSurfaceVariant),
                     const SizedBox(width: 8),
-                    const Text('点击要保存的图片，或选择：',
-                        style: TextStyle(fontSize: 14)),
+                    const Text('点击要保存的图片，或选择：', style: TextStyle(fontSize: 14)),
                   ],
                 ),
                 const SizedBox(height: 8),

@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_mobx/flutter_mobx.dart';
 import 'package:wyw/bean/appbar/app_bar_menu_button.dart';
 import 'package:wyw/bean/appbar/sys_app_bar.dart';
@@ -59,6 +60,16 @@ class _JsDevPageState extends State<JsDevPage> {
     });
   }
 
+  Future<void> _copyLogs() async {
+    final text = _controller.buildLogText();
+    if (text.trim().isEmpty) {
+      WywDialog.showToast(message: '暂无日志可复制');
+      return;
+    }
+    await Clipboard.setData(ClipboardData(text: text));
+    WywDialog.showToast(message: '已复制全部日志（${_controller.lines.length} 条）');
+  }
+
   Future<void> _clearLogs() async {
     final ok = await WywDialog.showConfirm(
       title: '清空日志',
@@ -77,6 +88,11 @@ class _JsDevPageState extends State<JsDevPage> {
         title: const Text('JS 开发'),
         needTopOffset: false,
         actions: [
+          IconButton(
+            tooltip: '复制日志',
+            icon: const Icon(Icons.copy_all),
+            onPressed: _copyLogs,
+          ),
           IconButton(
             tooltip: '清空日志',
             icon: const Icon(Icons.delete_sweep),

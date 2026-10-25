@@ -1,6 +1,7 @@
 // ignore_for_file: library_private_types_in_public_api
 import 'package:wyw/services/storage/storage.dart';
 
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter_volume_controller/flutter_volume_controller.dart';
@@ -8,11 +9,11 @@ import 'package:wyw/bean/dialog/dialog_helper.dart';
 import 'package:wyw/pages/player/controller/player_aspect_ratio.dart';
 import 'package:wyw/pages/player/controller/player_debug_controller.dart';
 import 'package:wyw/pages/player/controller/player_super_resolution.dart';
+import 'package:wyw/pages/player/controller/video_filter_controller.dart';
 import 'package:wyw/services/shaders/shader_asset_service.dart';
 import 'package:wyw/utils/constants.dart';
 import 'package:wyw/services/logging/logger.dart';
 import 'package:wyw/services/logging/log_tags.dart';
-import 'package:wyw/services/player/player_screenshot_service.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:mobx/mobx.dart';
@@ -60,8 +61,6 @@ abstract class _PlayerPlaybackController with Store {
   final ShaderAssetService shaderAssetService;
   final PlayerDebugController debug;
   final String Function() videoUrl;
-  final PlayerScreenshotService screenshotService =
-      const PlayerScreenshotService();
 
   _OwnedPlayer? _ownedPlayer;
   Player? get mediaPlayer => _ownedPlayer?.player;
@@ -72,13 +71,45 @@ abstract class _PlayerPlaybackController with Store {
   bool androidEnableOpenSLES = true;
   bool lowMemoryMode = false;
   bool autoPlay = true;
+
+  /// 调试模式：影响**下次创建播放器**时是否订阅 MPV 日志（见 `debug.setup`）。
+  /// 面板「更多」tab 与设置页共用同一个存储键，因此必须是 observable，
+  /// 否则面板改完不会自动重建（曾经靠一个私有 ValueNotifier 兜）。
+  @observable
   bool playerDebugMode = false;
+
+  /// 顶栏「跳过」按钮的快进秒数（长按可改）。面板「播放」tab 会直接改它，
+  /// 同样必须是 observable。
+  @observable
   int buttonSkipTime = 80;
+
   int arrowKeySkipTime = 10;
 
   /// 当前超分辨率模式
   @observable
   SuperResolutionMode superResolutionMode = SuperResolutionMode.off;
+
+  /// 画面调节滤镜着色器的文件名前缀（参数用 `#define` 静态烘焙进文件）。
+  ///
+  /// 关键：**mpv 只按 "glsl-shaders 链的最终内容" 判断是否需要重载**——
+  /// 同路径 `set`、或 `remove` + `append` 同一路径后链内容不变，mpv 都会
+  /// 跳过重载（这正是"改完必须重进播放器才生效"的原因；`glsl-shader-opts`
+  /// 运行时修改同样不触发重载，只在 shader 编译时读取）。因此每次调参都写
+  /// 一个**全新文件名**（`video_filters_<n>.glsl`），remove 旧 + append 新，
+  /// 链内容必然变化 → mpv 强制重新编译 → 滑杆实时生效。
+  static const String _filterShaderPrefix = 'video_filters';
+
+  /// 滑杆拖动节流：避免高频重载 shader。
+  static const Duration _filterDebounceInterval = Duration(milliseconds: 120);
+
+  /// 当前链中的滤镜 shader 文件名（null = 不在链中）。
+  String? _filterShaderPath;
+
+  /// 唯一文件名序号（每次调参 +1，保证链内容变化以触发重载）。
+  int _filterShaderSeq = 0;
+
+  Timer? _filterDebounce;
+  Map<String, double>? _pendingFilterParams;
 
   @observable
   double volume = -1;
@@ -344,8 +375,21 @@ abstract class _PlayerPlaybackController with Store {
             .e('${LogTag.player} 播放器内部错误 videoUrl=${videoUrl()}', error: event);
       });
 
+      // 新播放器的 glsl-shaders 链为空，滤镜"在链中"状态重置。
+      _filterShaderPath = null;
+
       if (superResolutionMode != SuperResolutionMode.off) {
         await setShader(superResolutionMode, player: player);
+        if (!isCurrentPlayer(player)) {
+          return await _discardIfNotCurrent(candidate);
+        }
+      }
+
+      // 应用当前画面调节滤镜（预设切换/编辑由 VideoFilterController 实时下发，
+      // 这里只负责播放器新建/重开时把持久化的活动预设补上）。
+      final filterVf = VideoFilterController.instance.activeVf;
+      if (filterVf != null) {
+        await _applyVideoFilterNow(filterVf, player: player);
         if (!isCurrentPlayer(player)) {
           return await _discardIfNotCurrent(candidate);
         }
@@ -375,42 +419,244 @@ abstract class _PlayerPlaybackController with Store {
     final currentPlayer = player ?? mediaPlayer;
     if (currentPlayer == null) return;
     try {
-      var pp = currentPlayer.platform as NativePlayer;
+      final pp = currentPlayer.platform as NativePlayer;
       await pp.waitForPlayerInitialization;
       await pp.waitForVideoControllerInitializationIfAttached;
       if (!identical(mediaPlayer, currentPlayer)) {
         return;
       }
-      switch (mode) {
-        case SuperResolutionMode.efficiency:
-          await pp.command([
-            'change-list',
-            'glsl-shaders',
-            'set',
-            _buildShadersAbsolutePath(
-              shaderAssetService.shadersDirectory.path,
-              mpvAnime4KShadersLite,
-            ),
-          ]);
-          break;
-        case SuperResolutionMode.quality:
-          await pp.command([
-            'change-list',
-            'glsl-shaders',
-            'set',
-            _buildShadersAbsolutePath(
-              shaderAssetService.shadersDirectory.path,
-              mpvAnime4KShaders,
-            ),
-          ]);
-          break;
-        case SuperResolutionMode.off:
-          await pp.command(['change-list', 'glsl-shaders', 'clr', '']);
-          break;
-      }
       superResolutionMode = mode;
+      await _applyShaderChain(pp);
     } catch (e) {
       WywLogger().w('${LogTag.player} 设置着色器失败 mode=${mode.name}', error: e);
+    }
+  }
+
+  /// 应用画面调节滤镜；[params] 为 null 时关闭滤镜。
+  ///
+  /// 由 [VideoFilterController] 在切换/编辑/删除预设时实时调用（暂停中也
+  /// 会重渲当前帧）；播放器新建时由初始化逻辑用 [_applyVideoFilterNow] 补一次
+  /// 持久化的活动预设（不走节流，立即生效）。
+  ///
+  /// 与超分辨率共存：Anime4K 组和 video_filters.glsl 合并成一条 glsl-shaders
+  /// 链。播放中参数变化把当前值**烘焙**进 shader 文件（`#define`），再用
+  /// `remove` + `append` 强制 mpv 重新加载该项——**路径不变时 `set` 会被 mpv
+  /// 判定为"链无变化"而跳过重载**（这正是"改完必须重进播放器才生效"的原因），
+  /// 而 `glsl-shader-opts` 运行时修改同样不触发重载（只在 shader 编译时读取）。
+  Future<void> setVideoFilterParams(
+    Map<String, double>? params, {
+    Player? player,
+  }) async {
+    _pendingFilterParams = params;
+    _filterDebounce?.cancel();
+    _filterDebounce = Timer(_filterDebounceInterval, () {
+      unawaited(_applyVideoFilterNow(
+        _pendingFilterParams,
+        player: player,
+        rebuildChain: false,
+      ));
+    });
+  }
+
+  /// 立即应用滤镜参数（初始化路径走 [rebuildChain]=true，整链 `set` 一次；
+  /// 播放中走节流版且 [rebuildChain]=false，烘焙文件后强制重载该项）。
+  Future<void> _applyVideoFilterNow(
+    Map<String, double>? params, {
+    Player? player,
+    bool rebuildChain = true,
+  }) async {
+    final currentPlayer = player ?? mediaPlayer;
+    if (currentPlayer == null) return;
+    try {
+      final pp = currentPlayer.platform as NativePlayer;
+      await pp.waitForPlayerInitialization;
+      if (!identical(mediaPlayer, currentPlayer)) {
+        return;
+      }
+      if (params == null) {
+        // 关闭：把当前 shader 移出链（链内容变化 → mpv 重载）并删除文件。
+        final old = _filterShaderPath;
+        _filterShaderPath = null;
+        if (old != null) {
+          await pp.command([
+            'change-list',
+            'glsl-shaders',
+            'remove',
+            _filterShaderAbsPath(old),
+          ]);
+          await _deleteFilterShader(old);
+        }
+        if (rebuildChain) {
+          await _applyShaderChain(pp);
+        }
+      } else {
+        final old = _filterShaderPath;
+        final next = await _writeFilterShader(params);
+        if (rebuildChain && old == null) {
+          // 初始化（或滤镜尚未进链）：整链一次 set。
+          _filterShaderPath = next;
+          await _applyShaderChain(pp);
+        } else {
+          // 播放中：remove 旧路径 + append 新路径——链内容必然变化，
+          // mpv 强制重新编译（同路径会被判定为"无变化"而跳过）。
+          if (old != null) {
+            await pp.command([
+              'change-list',
+              'glsl-shaders',
+              'remove',
+              _filterShaderAbsPath(old),
+            ]);
+          }
+          await pp.command([
+            'change-list',
+            'glsl-shaders',
+            'append',
+            _filterShaderAbsPath(next),
+          ]);
+          _filterShaderPath = next;
+          if (old != null) {
+            await _deleteFilterShader(old);
+          }
+        }
+      }
+      // 诊断：确认下发确实到达当前播放器（播放中不生效时据此区分
+      // "链路断" 与 "mpv 侧未重绘"）。
+      WywLogger().w(
+        '${LogTag.player} 画面滤镜已下发 params=$params '
+        'player=${identityHashCode(currentPlayer)} '
+        'playing=${currentPlayer.state.playing} shader=$_filterShaderPath',
+      );
+      // 暂停中 media_kit 不产生新帧（渲染循环无事可做），强制重绘当前帧。
+      if (identical(mediaPlayer, currentPlayer)) {
+        await pp.command(['redraw']);
+      }
+    } catch (e) {
+      WywLogger().w('${LogTag.player} 设置画面滤镜失败', error: e);
+    }
+  }
+
+  String _filterShaderAbsPath(String fileName) =>
+      '${shaderAssetService.shadersDirectory.path}'
+      '${Platform.pathSeparator}$fileName';
+
+  /// 把当前参数烘焙进一个新的唯一文件名（返回文件名）。
+  Future<String> _writeFilterShader(Map<String, double> params) async {
+    _filterShaderSeq++;
+    final fileName = '${_filterShaderPrefix}_$_filterShaderSeq.glsl';
+    await File(_filterShaderAbsPath(fileName))
+        .writeAsString(_filterShaderSource(params));
+    return fileName;
+  }
+
+  /// 删除上一个临时 shader 文件（失败可忽略）。
+  Future<void> _deleteFilterShader(String fileName) async {
+    try {
+      final file = File(_filterShaderAbsPath(fileName));
+      if (await file.exists()) {
+        await file.delete();
+      }
+    } catch (_) {
+      // 静默可接受：临时文件清理失败不影响功能
+    }
+  }
+
+  /// 生成参数烘焙版滤镜着色器源码（`#define` 静态参数，Anime4K v3 同款写法）。
+  ///
+  /// 显式提升 sampler/float 精度：libmpv 旧 GPU renderer 默认把 sampler 声明为
+  /// `mediump`，复杂运算下会出现全局偏色（media-kit#1438 / Kazumi#1547）。
+  String _filterShaderSource(Map<String, double> params) {
+    final sharpness = params['wyw_filter_sharpness'] ?? 0.0;
+    final contrast = params['wyw_filter_contrast'] ?? 1.0;
+    final saturation = params['wyw_filter_saturation'] ?? 1.0;
+    final brightness = params['wyw_filter_brightness'] ?? 0.0;
+    final gamma = params['wyw_filter_gamma'] ?? 1.0;
+    return '''
+// wyw 画面调节滤镜（参数烘焙版）
+//!DESC wyw 画面调节滤镜
+//!HOOK MAIN
+//!BIND HOOKED
+
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+precision highp sampler2D;
+#endif
+
+#define WYW_SHARPNESS ${sharpness.toStringAsFixed(3)}
+#define WYW_CONTRAST ${contrast.toStringAsFixed(3)}
+#define WYW_SATURATION ${saturation.toStringAsFixed(3)}
+#define WYW_BRIGHTNESS ${brightness.toStringAsFixed(3)}
+#define WYW_GAMMA ${gamma.toStringAsFixed(3)}
+
+vec4 hook() {
+    vec4 c = HOOKED_tex(HOOKED_pos);
+    vec3 rgb = c.rgb;
+
+    // 亮度（加法，与 ffmpeg eq 同序、先做）
+    rgb += WYW_BRIGHTNESS;
+
+    // 对比度（围绕 0.5 缩放）
+    rgb = (rgb - 0.5) * WYW_CONTRAST + 0.5;
+
+    // 饱和度（按 luma 混合）
+    float luma = dot(vec3(0.299, 0.587, 0.114), rgb);
+    rgb = mix(vec3(luma), rgb, WYW_SATURATION);
+
+    // 伽马（ffmpeg eq 语义：pow(1/gamma)，>1 变亮）
+    rgb = pow(max(rgb, vec3(0.0)), vec3(1.0 / WYW_GAMMA));
+
+    // 锐化（unsharp mask：原图 − 3×3 盒式模糊后按系数加回）
+    if (WYW_SHARPNESS > 0.0001) {
+        vec2 pt = vec2(1.0) / HOOKED_size;
+        vec3 blurred =
+            HOOKED_tex(HOOKED_pos + vec2(-pt.x, -pt.y)).rgb +
+            HOOKED_tex(HOOKED_pos + vec2(0.0, -pt.y)).rgb +
+            HOOKED_tex(HOOKED_pos + vec2(pt.x, -pt.y)).rgb +
+            HOOKED_tex(HOOKED_pos + vec2(-pt.x, 0.0)).rgb +
+            c.rgb +
+            HOOKED_tex(HOOKED_pos + vec2(pt.x, 0.0)).rgb +
+            HOOKED_tex(HOOKED_pos + vec2(-pt.x, pt.y)).rgb +
+            HOOKED_tex(HOOKED_pos + vec2(0.0, pt.y)).rgb +
+            HOOKED_tex(HOOKED_pos + vec2(pt.x, pt.y)).rgb;
+        blurred /= 9.0;
+        rgb += (rgb - blurred) * WYW_SHARPNESS;
+    }
+
+    return vec4(rgb, c.a);
+}
+''';
+  }
+
+  /// 按「超分辨率 Anime4K 组 + 画面调节滤镜」构建并下发整条 glsl-shaders 链。
+  ///
+  /// 超分辨率与滤镜任一侧变化都走这里（`set` 整链替换；两侧都关则 `clr`），
+  /// 保证二者可同时生效而不会相互覆盖。
+  Future<void> _applyShaderChain(NativePlayer pp) async {
+    final shaders = <String>[];
+    switch (superResolutionMode) {
+      case SuperResolutionMode.efficiency:
+        shaders.addAll(mpvAnime4KShadersLite);
+        break;
+      case SuperResolutionMode.quality:
+        shaders.addAll(mpvAnime4KShaders);
+        break;
+      case SuperResolutionMode.off:
+        break;
+    }
+    if (_filterShaderPath != null) {
+      shaders.add(_filterShaderPath!);
+    }
+    if (shaders.isEmpty) {
+      await pp.command(['change-list', 'glsl-shaders', 'clr', '']);
+    } else {
+      await pp.command([
+        'change-list',
+        'glsl-shaders',
+        'set',
+        _buildShadersAbsolutePath(
+          shaderAssetService.shadersDirectory.path,
+          shaders,
+        ),
+      ]);
     }
   }
 
@@ -607,15 +853,12 @@ abstract class _PlayerPlaybackController with Store {
     ]);
   }
 
-  Future<Uint8List?> screenshot({String format = 'image/jpeg'}) async {
-    return await mediaPlayer!.screenshot(format: format);
-  }
-
   Future<Uint8List?> screenshotPng() async {
     final player = mediaPlayer;
     if (player == null) {
       return null;
     }
-    return await screenshotService.capturePng(player);
+    // Encode the captured frame natively; PlayerState dimensions may be stale.
+    return player.safeScreenshot(format: 'image/png');
   }
 }

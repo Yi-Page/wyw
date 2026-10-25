@@ -23,8 +23,10 @@ import 'package:wyw/bean/widget/media_error_widget.dart';
 import 'package:wyw/services/player/timed_shutdown_service.dart';
 import 'package:wyw/utils/device.dart';
 import 'package:wyw/services/platform/display_mode_service.dart';
+import 'package:wyw/services/platform/screen_orientation.dart';
 import 'package:wyw/pages/video/video_route_args.dart';
-import 'package:wyw/bean/widget/video_episode_panel.dart';
+import 'package:wyw/modules/download/download_module.dart';
+import 'package:wyw/pages/download/download_episode_sheet.dart';
 
 class VideoPage extends StatefulWidget {
   const VideoPage({
@@ -58,21 +60,7 @@ class _VideoPageState extends State<VideoPage>
   StreamSubscription<String>? _logSubscription;
   final FocusNode keyboardFocus = FocusNode();
 
-  late AnimationController animation;
-
-  /// 选集面板是否展开（右侧抽屉）。
-  bool _tabBodyTargetVisible = false;
-
   late final bool disableAnimations;
-
-  static const Duration _sideTabAnimationDuration = Duration(milliseconds: 120);
-
-  late AnimationController _maskOpacityAnimation;
-  late Animation<Offset> _rightOffsetAnimation;
-
-  /// 横屏判断：宽 > 高。
-  bool get _windowIsLandscape =>
-      MediaQuery.sizeOf(context).width > MediaQuery.sizeOf(context).height;
 
   @override
   void initState() {
@@ -97,26 +85,19 @@ class _VideoPageState extends State<VideoPage>
       // 非桌面端恒为全屏（沉浸式）播放，进入页面即全屏。
       videoPageController.enterFullScreen();
     }
-
-    animation = AnimationController(
-      duration: _sideTabAnimationDuration,
-      vsync: this,
+    // 播放页方向：占用方向服务，按设置里的「播放器默认方向」生效（默认自由旋转）。
+    // 占用是显式的，所以任何页面残留的方向锁都带不进播放页——这正是此前
+    // 「屏幕转不动、按钮却显示可旋转」的成因。
+    unawaited(
+      ScreenOrientationService.instance.acquire(
+        ScreenOrientationService.ownerPlayer,
+        ScreenOrientationService.playerPolicyFromSettings(),
+      ),
     );
-    _maskOpacityAnimation = AnimationController(
-      duration: _sideTabAnimationDuration,
-      vsync: this,
-    );
-    _rightOffsetAnimation = Tween<Offset>(
-      begin: const Offset(1, 0),
-      end: Offset.zero,
-    ).animate(
-        CurvedAnimation(parent: _maskOpacityAnimation, curve: Curves.easeIn));
 
     playResume = GStorage.getSetting(SettingsKeys.playResume);
     disableAnimations =
         GStorage.getSetting(SettingsKeys.playerDisableAnimations);
-    // 桌面/竖屏默认收起右侧抽屉；横屏进入时点选集按钮展开
-    _tabBodyTargetVisible = false;
   }
 
   @override
@@ -179,16 +160,6 @@ class _VideoPageState extends State<VideoPage>
     } catch (e) {
       WywLogger().d('${LogTag.player} 移除窗口事件监听失败（已忽略）', error: e);
     }
-    try {
-      animation.dispose();
-    } catch (e) {
-      WywLogger().d('${LogTag.player} 释放页面动画控制器失败（已忽略）', error: e);
-    }
-    try {
-      _maskOpacityAnimation.dispose();
-    } catch (e) {
-      WywLogger().d('${LogTag.player} 释放选集面板遮罩动画控制器失败（已忽略）', error: e);
-    }
 
     try {
       _logSubscription?.cancel();
@@ -212,7 +183,12 @@ class _VideoPageState extends State<VideoPage>
       // 非桌面端进入播放页时隐藏了系统状态栏，退出时恢复。
       DisplayModeService.exitFullScreen();
     }
-    DisplayModeService.unlockScreenRotation();
+    // 释放播放页方向占用：落回「应用方向」（播放器/阅读器之外的界面那一档）。
+    unawaited(
+      ScreenOrientationService.instance.release(
+        ScreenOrientationService.ownerPlayer,
+      ),
+    );
     keyboardFocus.dispose();
     TimedShutdownService().cancel();
     super.dispose();
@@ -252,65 +228,40 @@ class _VideoPageState extends State<VideoPage>
     });
   }
 
-  // ===== 选集面板动画 =====
+  // ===== 选集面板 =====
+  //
+  // 选集入口已收编进播放器分屏面板的「选集」tab（`split_tabs/tab_episodes.dart`，
+  // 与本页原面板是同一份 `EpisodeSelectionPanel`）。本页不再自持抽屉/竖屏弹窗：
+  // 播放页顶栏的选集按钮已退场，侧栏（`VideoSidePanel`）与竖屏选集弹窗随之删除。
 
-  void _toggleTabBodyAnimated() {
-    if (_windowIsLandscape) {
-      // 横屏：右侧抽屉展开/收起
-      if (_tabBodyTargetVisible) {
-        _closeTabBodyAnimated();
-      } else {
-        _openTabBodyAnimated();
-      }
-      return;
-    }
-    // 竖屏：从底部弹出选集面板（可下滑收起）
-    unawaited(_showPortraitEpisodeSheet());
-  }
+  /// 本作每集的下载任务（键为 `线路:集数`），供面板回显下载状态。
+  Map<String, DownloadEpisode> _episodeDownloads() =>
+      inject<DownloadController>().episodeDownloadsFor(
+        code: videoPageController.videoCode,
+      );
 
-  /// 竖屏从底部弹出选集/线路面板（bottom sheet，可下滑关闭）。
-  Future<void> _showPortraitEpisodeSheet() async {
-    if (!mounted) return;
-    final selected = await showAdaptiveBottomSheet<(int, int)>(
+  /// 「缓存剧集」：打开批量选集下载 sheet。
+  ///
+  /// 内容盒放开到窗口（maxHeightFactor 1.0），面板内的高度比例即窗口比例
+  /// （下载选集 0.5 初始/最小、0.8 最高，小于父面板的 0.9）。
+  Future<void> _showDownloadEpisodeSheet(int road) {
+    return showAdaptiveBottomSheet<void>(
       context: context,
-      builder: (sheetContext) => SizedBox(
-        height: MediaQuery.sizeOf(sheetContext).height * 0.6,
-        child: VideoEpisodePanel(
-          title: videoPageController.videoTitle,
-          sources: videoPageController.sources,
-          currentSourceIndex: videoPageController.currentSourceIndex,
-          currentEpisodeIndex: videoPageController.currentEpisodeIndex,
-          onEpisodeTap: (s, e) => Navigator.of(sheetContext).pop((s, e)),
-          onDownloadEpisode: (s, e) =>
-              videoPageController.downloadEpisode(s, e),
-          sourceKey: videoPageController.sourceKey,
-          videoId: videoPageController.videoId,
+      maxHeightFactor: 1.0,
+            builder: (context) => Observer(
+        // 下载任务在 Observer 内取：本 sheet 的 builder 只跑一次，
+        // 快照会让「已缓存 / 缓存 N%」停在打开那一刻。
+        builder: (context) => DownloadEpisodeSheet(
+          road: road,
+          roads: videoPageController.sources,
+          downloads: _episodeDownloads(),
+          initialEpisodeIndex: videoPageController.currentEpisodeIndex,
+          onDownloadEpisode: (sourceIndex, episodeIndex) => unawaited(
+            videoPageController.downloadEpisode(sourceIndex, episodeIndex),
+          ),
         ),
       ),
     );
-    if (selected == null || !mounted) return;
-    final (source, episode) = selected;
-    _onEpisodeTap(source, episode);
-  }
-
-  void _openTabBodyAnimated() {
-    if (_tabBodyTargetVisible) return;
-    setState(() {
-      _tabBodyTargetVisible = true;
-    });
-    if (mounted && !disableAnimations) {
-      _maskOpacityAnimation.forward();
-    }
-  }
-
-  void _closeTabBodyAnimated() {
-    if (!_tabBodyTargetVisible) return;
-    setState(() {
-      _tabBodyTargetVisible = false;
-    });
-    if (mounted && !disableAnimations) {
-      _maskOpacityAnimation.reverse();
-    }
   }
 
   /// 重播当前集（刷新按钮/解析失败重试用）。
@@ -379,7 +330,6 @@ class _VideoPageState extends State<VideoPage>
       child: Observer(
         builder: (context) {
           final bool isPip = videoPageController.isPip;
-          final bool isLandscape = _windowIsLandscape;
           return Scaffold(
             appBar: null,
             body: SafeArea(
@@ -397,21 +347,7 @@ class _VideoPageState extends State<VideoPage>
                     width: MediaQuery.sizeOf(context).width,
                     child: playerBody,
                   ),
-                  if (isLandscape && _tabBodyTargetVisible && !isPip) ...[
-                    if (disableAnimations) ...[
-                      sideTabMask,
-                      sideTabBody,
-                    ] else ...[
-                      FadeTransition(
-                        opacity: _maskOpacityAnimation,
-                        child: sideTabMask,
-                      ),
-                      SlideTransition(
-                        position: _rightOffsetAnimation,
-                        child: sideTabBody,
-                      ),
-                    ],
-                  ],
+                  // 右侧抽屉（VideoSidePanel）已随分屏面板「选集」tab 退场。
                 ],
               ),
             ),
@@ -453,7 +389,8 @@ class _VideoPageState extends State<VideoPage>
                                   videoPageController.loading
                                       ? '视频资源解析中'
                                       : '视频资源解析成功, 播放器加载中',
-                                  style: const TextStyle(color: MediaChromeColors.foreground),
+                                  style: const TextStyle(
+                                      color: MediaChromeColors.foreground),
                                 ),
                               ],
                             ),
@@ -534,7 +471,11 @@ class _VideoPageState extends State<VideoPage>
                   onBackPressed: onBackPressed,
                   keyboardFocus: keyboardFocus,
                   pauseForTimedShutdown: pauseForTimedShutdown,
-                  toggleEpisodePanel: _toggleTabBodyAnimated,
+                  // 分屏面板「选集」tab 复用本页的切集与下载入口，语义与本页
+                  // 原选集面板完全一致（该面板已退场）。
+                  onEpisodeSelected: _onEpisodeTap,
+                  onDownloadEpisode: (road) =>
+                      unawaited(_showDownloadEpisodeSheet(road)),
                 ),
         ),
       ],
@@ -542,58 +483,12 @@ class _VideoPageState extends State<VideoPage>
   }
   // ===== 选集 / 线路面板 =====
 
-  /// 右侧抽屉本体。
-  Widget get sideTabBody {
-    return SizedBox(
-      height: MediaQuery.sizeOf(context).height,
-      width: (!isDesktop() && !isTablet())
-          ? MediaQuery.sizeOf(context).height
-          : (MediaQuery.sizeOf(context).width / 3 > 420
-              ? 420
-              : MediaQuery.sizeOf(context).width / 3),
-      child: Container(
-        color: Theme.of(context).canvasColor,
-        child: VideoEpisodePanel(
-          title: videoPageController.videoTitle,
-          sources: videoPageController.sources,
-          currentSourceIndex: videoPageController.currentSourceIndex,
-          currentEpisodeIndex: videoPageController.currentEpisodeIndex,
-          onEpisodeTap: _onEpisodeTap,
-          onDownloadEpisode: (s, e) =>
-              videoPageController.downloadEpisode(s, e),
-          sourceKey: videoPageController.sourceKey,
-          videoId: videoPageController.videoId,
-        ),
-      ),
-    );
-  }
-
-  /// 右侧抽屉遮罩（左深右浅，点击关闭）。
-  Widget get sideTabMask {
-    return GestureDetector(
-      onTap: _closeTabBodyAnimated,
-      child: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.centerLeft,
-            end: Alignment.centerRight,
-            colors: [
-              MediaChromeColors.scrim.withValues(alpha: 0.5),
-              Colors.transparent,
-            ],
-          ),
-        ),
-        width: double.infinity,
-        height: double.infinity,
-      ),
-    );
-  }
-
-  /// 选集面板点击某集：切到该线路/集并播放，然后关闭面板。
+  /// 选集面板点击某集：切到该线路/集并播放。
+  ///
+  /// 面板的「选集」tab 与视频页共用这一条路径（见 `PlayerItem.onEpisodeSelected`）。
   void _onEpisodeTap(int sourceIndex, int episodeIndex) {
     if (sourceIndex == videoPageController.currentSourceIndex &&
         episodeIndex == videoPageController.currentEpisodeIndex) {
-      _closeTabBodyAnimated();
       return;
     }
     videoPageController.playEpisode(
@@ -601,6 +496,5 @@ class _VideoPageState extends State<VideoPage>
       episodeIndex: episodeIndex,
       playerController: playerController,
     );
-    _closeTabBodyAnimated();
   }
 }

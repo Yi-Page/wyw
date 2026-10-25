@@ -68,7 +68,7 @@ appModule
 2. **控制器生命周期分层**：
    - 页面私有 Store → 路由级 `provide: (s) => s.add<XxxController>(...)`，离开路由自动销毁（video/reader/novel/js_dev/descriptor 均如此）；
    - 跨页共享状态 → `coreModule` 单例（BrowseController、SearchPageController、HistoryController、VideoPageController、DownloadController、PluginController）；
-   - 模块级单例 → 模块内 `addSingleton`（historyModule 的 PluginHistoryController）。
+   - 模块级单例 → 模块内 `addSingleton`（collectModule 的 CollectController）。
 3. **参数校验兜底**：typed args 用 `is! XxxRouteArgs` 判断并回退错误页（video 用 null 容忍，reader/novel 用错误 Scaffold，webview 用 RouteErrorPage）。
 4. **guard 用法**：`/tab/` 根路由按 `defaultStartupPage` 设置重定向，是当前唯一的 guard。
 5. **壳内导航**：Tab 切换走 `RouterOutlet.navigate('/tab<path>/')`，系统返回在壳层 `PopScope` 拦截（outlet 内 pop → 切回第一个 tab → 双击退出），由 `menu.dart` 统一处理。
@@ -84,7 +84,7 @@ appModule
 | R3 | **尾斜杠写法不统一**：多数调用带 `/`（`pushNamed('/history/')`），部分不带（`/settings/theme/display`、`/settings/player/decoder`、ImageViewer 的 `routePath`） | 各调用点 | ✅ 已改齐（modular 7 匹配对尾斜杠归一化，已验证） |
 | R4 | **参数传递三种风格并存**：typed args class（video/reader/novel/image-preview）、裸 String（webview）、裸 Map（descriptor） | 各模块 | ✅ 已全部 typed args |
 | R5 | **参数无效兜底页不统一**：内联 `Scaffold(appBar: AppBar('wyw'))`（index_module、comic_reader_module、novel_reader_module）vs `RouteErrorPage`（webview_module） | 各模块 | ✅ 已统一 RouteErrorPage |
-| R6 | 历史页同页面注册 3 条路由表达 Tab 初值（`/history`、`/history/browse`、`/history/progress`），调用方也有直接 `pushNamed('/history/')` | history_module | ✅ 决策：保留三条直达路由 |
+| R6 | 历史页同页面注册 3 条路由表达 Tab 初值（`/history`、`/history/browse`、`/history/progress`），调用方也有直接 `pushNamed('/history/')` | history_module | ✅ 已收敛：插件浏览历史移入收藏模块后，历史页只剩进度 tab，保留 `/history/` 与 `/history/progress/`（语义别名）；收藏页是独立模块 `/collect/` |
 | R7 | `/error` 是内联简陋页，与 `RouteErrorPage` 视觉风格不一致 | index_module | ✅ 已对齐 |
 
 ### 3. 界面现状
@@ -183,7 +183,7 @@ appModule
 - 🔧 改造：`/descriptor` 的裸 Map → `DescriptorPageRouteArgs`（字段不变：plugin/method/args/title/actions）。
 - 🔧 改造：`/webview` 的裸 String → `WebviewPageRouteArgs(url)`。
 - 约定：参数类含回调字段是合法用法（如 `onProgressChanged` 回写历史），但回调必须由「发起导航的一方」注入，页面不得反查调用方。
-- 历史页 Tab 初值（R6）：**保留三条路由**（可直达、语义清晰，2026-09-06 决策）：`/history/` 默认进度 Tab；`/history/browse/`、`/history/progress/` 仅作直达别名，页面内部切换不再改路由。
+- 历史页 Tab 初值（R6）：**已收敛为单 tab**（2026 收藏模块落地）：浏览历史整体移入 `/collect/`，历史页只留进度历史，保留 `/history/`（默认）与 `/history/progress/`（语义别名）两条路由。
 
 #### A5. 参数校验与错误兜底
 
@@ -196,7 +196,7 @@ appModule
 |---|---|---|
 | 页面私有，随路由销毁 | 模块内 `provide: (s) => s.add<XxxController>(...)`，页面用 `context.read<T>()` | PlayerController、ComicReaderController |
 | 跨页共享、会话级 | `coreModule` `addSingleton` | BrowseController、HistoryController |
-| 单一功能域内跨页 | 功能模块内 `addSingleton` | PluginHistoryController |
+| 单一功能域内跨页 | 功能模块内 `addSingleton` | CollectController（collectModule） |
 
 **禁则**：页面不得把路由级 Store 塞进 coreModule 变通；跨页 Store 里不得持有页面 Widget 引用。
 
@@ -308,7 +308,7 @@ appModule
 
 **组件**：`lib/bean/appbar/app_bar_menu_button.dart`（`WywAppBarMenuButton` + `AppBarMenuEntry`）。
 
-- 默认条目：历史记录 `/history/`、离线下载 `/settings/download/`、设置 `/settings/`（用户决策：三项起步，架构支持追加）。
+- 默认条目：历史记录 `/history/`、收藏 `/collect/`、离线下载 `/settings/download/`、设置 `/settings/`（用户决策：三项起步、架构支持追加；收藏模块落地后追加为第四项）。
 - **`pagePath` 必填**（2026-09-06 三次修订）：modular 7 的 `routeState()` 只反映**栈底**（push 的页面刻意「不进 URL」，框架注释原文 "modal-like, lost on refresh by design"），组件无法从 context 读到「自己在哪一页」，也无法读到栈顶——所以宿主页面必须显式传自己的注册路径（如 `WywAppBarMenuButton(pagePath: '/history/')`）。
 - **防重复导航语义**（2026-09-06 五次修订，收敛为**单一出栈循环**，替代此前的菜单链镜像 / presence 登记 / 互斥双机制）：
   1. **已在本页**（`entry.route == pagePath`）→ 条目**禁用**（置灰可见，不隐藏——菜单布局稳定，当前位置可感知）；
@@ -317,7 +317,7 @@ appModule
   4. **设置壳特例**（2026-09-06 补）：设置壳单栏模式把详情页挂在壳的内部 Navigator、双栏模式嵌入右窗格——两种形态下可见页都**不在根栈**，出栈循环推理失效。组件用 `SettingsPaneScope` 识别壳内宿主：指向设置根的条目改走壳内 `onBack`（单栏，回分类列表）/禁用（双栏，人已在设置界面）；其余条目一律根栈 push（壳保留在栈下，返回键回原详情页）。注意 日志/规则管理/离线下载管理 存在「壳内分类页」与「独立路由」两种形态，同一组件自动适配。
 - **语义回归测试**：`test/app_bar_menu_button_test.dart`（本页禁用 / 夹心栈回退不嵌套 / 互斥抛出旧区块 / presence-less 兜底 push / 设置壳单栏 onBack / 双栏禁用 六用例）。注意写栈断言时 `find.byType(..., skipOffstage: false)`——Navigator 会把不透明路由下方的页面包进 Offstage。
 - 页面特有动作不迁移：history 的编辑/清空、descriptor 的插件动作、plugin_manager 的多选动作保留在菜单按钮左侧；本按钮固定放 actions 末尾。
-- 应用页（9 个）：my、search、browse、history、descriptor、download、logs、js_dev、plugin_manager。**不加**：阅读器/webview（自有工具行）、settings 二级详情页（返回一步即设置根）、播放器（用户决策：不动；PlayerPanelHoldMenuAnchor 保持播放器专用）。
+- 应用页（10 个）：my、search、browse、history、collect、descriptor、download、logs、js_dev、plugin_manager。**不加**：阅读器/webview（自有工具行）、settings 二级详情页（返回一步即设置根）、播放器（用户决策：不动；PlayerPanelHoldMenuAnchor 保持播放器专用）。
 - 同步收敛的既有散点：search 的历史图标从搜索框行移入标准 actions；browse 补 `SysAppBar`（TabBar 保持 body 顶部，与搜索页同构）；history/descriptor 的独立下载图标由菜单取代。
 
 ### C. 迁移清单（把不一致改齐的最小改动集）

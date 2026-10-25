@@ -115,9 +115,14 @@ class ScriptEngine extends BaseJsEngine {
         // 设置超时，避免 Promise 永远不 resolve。
         // 必须大于 WebView 取页面的默认超时（50s），否则测试台会先于
         // webview 的真实结果（成功/明确错误）掐断，只剩笼统的 Async timeout。
+        //
+        // 注意：定时器在 runTest 正常完成后**仍会触发**（不会自动取消），
+        // 而正常完成路径（__asyncResolve）已把 _pendingAsyncResult 置 null，
+        // 若这里直接 `!` 解包就会空指针崩溃。必须判 null 再处理。
         Future.delayed(const Duration(seconds: 90), () {
-          if (!_pendingAsyncResult!.isCompleted) {
-            _pendingAsyncResult!.complete(RunResult(
+          final pending = _pendingAsyncResult;
+          if (pending != null && !pending.isCompleted) {
+            pending.complete(RunResult(
               returnValue: null,
               logs: logs,
               error: 'Async timeout after 90s',
@@ -213,5 +218,16 @@ class LogEntry {
   final LogLevel level;
   final String message;
 
-  const LogEntry({required this.level, required this.message});
+  /// 该条日志在 JS 侧**产生**的时刻（测试台捕获到 log 消息时记录）。
+  ///
+  /// 必须在这里记时间，而不是在日志写进面板时记：`runTest` 结束后才会把
+  /// 整批日志一次性 append 到面板，若那时才取 `DateTime.now()`，同一批日志
+  /// 的时间戳会全部相同、失去排查价值（「一键复制日志」复制出来尤其明显）。
+  final DateTime timestamp;
+
+  LogEntry({
+    required this.level,
+    required this.message,
+    DateTime? timestamp,
+  }) : timestamp = timestamp ?? DateTime.now();
 }

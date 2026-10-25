@@ -57,7 +57,8 @@ void main() {
 
   test('全 JPEG 输入时输出 JPEG', () {
     final jpeg = img.encodeJpg(img.Image(width: 2, height: 2));
-    final out = stitchImages([jpeg, jpeg], vertical: true, reverseOrder: false)!;
+    final out =
+        stitchImages([jpeg, jpeg], vertical: true, reverseOrder: false)!;
     expect(isJpegBytes(out), isTrue);
   });
 
@@ -75,8 +76,9 @@ void main() {
 
   test('解码失败或空输入返回 null', () {
     expect(
-      stitchImages([Uint8List.fromList([1, 2, 3])],
-          vertical: true, reverseOrder: false),
+      stitchImages([
+        Uint8List.fromList([1, 2, 3])
+      ], vertical: true, reverseOrder: false),
       isNull,
     );
     expect(stitchImages(const [], vertical: true, reverseOrder: false), isNull);

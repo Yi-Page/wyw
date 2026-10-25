@@ -50,10 +50,8 @@ const _settingsTestEntries = [
 Widget _app() {
   final module = createModule(register: (c) {
     c
-      ..route('/',
-          child: (context, state) => const _HostPage(pagePath: '/a/'))
-      ..route('/b',
-          child: (context, state) => const _HostPage(pagePath: '/b/'))
+      ..route('/', child: (context, state) => const _HostPage(pagePath: '/a/'))
+      ..route('/b', child: (context, state) => const _HostPage(pagePath: '/b/'))
       ..route('/c',
           child: (context, state) => const _HostPage(pagePath: '/c/'));
   });
@@ -121,12 +119,9 @@ void main() {
     // /a/ → B → /b/，再用系统级 pop 返回 /a/（pop 触发 /b/ dispose，
     // presence 随之注销——目标已确实不在栈内）
     await _openMenuAndTap(tester, 'B');
-    tester
-        .state<NavigatorState>(find.byType(Navigator).first)
-        .pop();
+    tester.state<NavigatorState>(find.byType(Navigator).first).pop();
     await tester.pumpAndSettle();
-    expect(
-        find.text('page:/a/', skipOffstage: false), findsOneWidget);
+    expect(find.text('page:/a/', skipOffstage: false), findsOneWidget);
     // 再点 B：presence 已注销 → 直接 push
     await _openMenuAndTap(tester, 'B');
     expect(_hostPageCount(tester), 2, reason: '应重新 push 到 /b/');
@@ -164,8 +159,8 @@ void main() {
     await tester.pumpWidget(ModularApp(
       module: module,
       child: Builder(
-        builder: (context) =>
-            MaterialApp.router(routerConfig: ModularApp.routerConfigOf(context)),
+        builder: (context) => MaterialApp.router(
+            routerConfig: ModularApp.routerConfigOf(context)),
       ),
     ));
     await tester.pumpAndSettle();
@@ -173,8 +168,8 @@ void main() {
     await _openMenuAndTap(tester, '设置');
     expect(backCalls, 1, reason: '应走壳内 onBack 回分类列表');
     // 没有发生根栈导航：宿主页原地不动，栈深不变
-    expect(find.text('page:/settings/logs/', skipOffstage: false),
-        findsOneWidget);
+    expect(
+        find.text('page:/settings/logs/', skipOffstage: false), findsOneWidget);
     expect(_hostPageCount(tester), 1);
   });
 
@@ -198,8 +193,8 @@ void main() {
     await tester.pumpWidget(ModularApp(
       module: module,
       child: Builder(
-        builder: (context) =>
-            MaterialApp.router(routerConfig: ModularApp.routerConfigOf(context)),
+        builder: (context) => MaterialApp.router(
+            routerConfig: ModularApp.routerConfigOf(context)),
       ),
     ));
     await tester.pumpAndSettle();
@@ -207,8 +202,8 @@ void main() {
     // 双栏嵌入：人已在设置界面 → 设置条目禁用
     await tester.tap(find.byIcon(Icons.more_vert));
     await tester.pumpAndSettle();
-    final settingsItem = tester.widget<MenuItemButton>(
-        find.widgetWithText(MenuItemButton, '设置'));
+    final settingsItem = tester
+        .widget<MenuItemButton>(find.widgetWithText(MenuItemButton, '设置'));
     expect(settingsItem.onPressed, isNull, reason: '双栏嵌入时已在设置界面');
     // 禁用项点了不应有反应，且菜单保持打开
     await tester.tap(find.text('设置').last);
@@ -219,5 +214,18 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('page:/b/'), findsOneWidget);
     expect(_hostPageCount(tester), 2);
+  });
+
+  test('默认条目覆盖全部全局入口（含收藏）', () {
+    // 顶栏「更多」是全局入口的唯一清单；新增全局页面必须加在这里，
+    // 否则页面只能靠 pushNamed 到达（用户视角就是"没有入口"）。
+    expect(
+      WywAppBarMenuButton.defaultEntries.map((e) => e.route).toList(),
+      ['/history/', '/collect/', '/settings/download/', '/settings/'],
+    );
+    expect(
+      WywAppBarMenuButton.defaultEntries.map((e) => e.label).toList(),
+      ['历史记录', '收藏', '离线下载', '设置'],
+    );
   });
 }

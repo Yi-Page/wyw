@@ -26,7 +26,9 @@ class _PlayerItemSurfaceState extends State<PlayerItemSurface> {
         return Container(
           color: MediaChromeColors.surface,
           child: const Center(
-            child: CircularProgressIndicator(),
+            child: ExcludeSemantics(
+              child: CircularProgressIndicator(),
+            ),
           ),
         );
       }

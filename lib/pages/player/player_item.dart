@@ -1,12 +1,21 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:canvas_danmaku/canvas_danmaku.dart';
 import 'package:wyw/bean/styles/media_chrome_colors.dart';
+import 'package:wyw/modules/danmaku/danmaku_module.dart';
+import 'package:wyw/modules/danmaku/danmaku_shield_rule.dart';
 import 'package:wyw/pages/player/player_item_panel.dart';
+import 'package:wyw/pages/player/player_split_panel.dart';
+import 'package:wyw/pages/player/split_tabs/split_tab_host.dart';
+import 'package:wyw/pages/player/widgets/player_split_layout.dart';
 import 'package:wyw/pages/player/controller/player_super_resolution.dart';
+import 'package:wyw/pages/player/controller/video_filter_controller.dart';
 import 'package:wyw/pages/player/player_panel_hold.dart';
 import 'package:wyw/pages/player/player_pointer_interaction.dart';
 import 'package:wyw/pages/player/player_screenshot_feedback_overlay.dart';
-import 'package:wyw/pages/player/smallest_player_item_panel.dart';
+import 'package:wyw/pages/player/player_screenshot_sheet.dart';
+import 'package:wyw/pages/player/controller/player_screenshot_controller.dart';
+import 'package:wyw/services/player/timed_shutdown_service.dart';
 import 'package:wyw/utils/constants.dart';
 import 'package:wyw/services/logging/logger.dart';
 import 'package:wyw/services/logging/log_tags.dart';
@@ -19,9 +28,7 @@ import 'package:flutter_mobx/flutter_mobx.dart';
 import 'package:flutter_modular/flutter_modular.dart';
 import 'package:wyw/pages/video/video_controller.dart';
 import 'package:window_manager/window_manager.dart';
-import 'package:wyw/bean/dialog/adaptive_bottom_sheet.dart';
 import 'package:wyw/bean/dialog/dialog_helper.dart';
-import 'package:wyw/utils/clipboard.dart';
 import 'package:screen_brightness_platform_interface/screen_brightness_platform_interface.dart';
 import 'package:wyw/services/storage/storage.dart';
 import 'package:wyw/pages/player/player_item_surface.dart';
@@ -39,7 +46,8 @@ class PlayerItem extends StatefulWidget {
     required this.keyboardFocus,
     required this.pauseForTimedShutdown,
     this.disableAnimations = false,
-    this.toggleEpisodePanel,
+    this.onEpisodeSelected,
+    this.onDownloadEpisode,
   });
 
   final PlayerController playerController;
@@ -48,8 +56,11 @@ class PlayerItem extends StatefulWidget {
   final bool disableAnimations;
   final VoidCallback pauseForTimedShutdown;
 
-  /// 选集/线路面板切换回调（由视频页传入，打开右侧抽屉/下方 tab）。
-  final VoidCallback? toggleEpisodePanel;
+  /// 面板「选集」tab 的切集回调：`(sourceIndex, episodeIndex)`，0 基。
+  final void Function(int sourceIndex, int episodeIndex)? onEpisodeSelected;
+
+  /// 面板「选集」tab 的「缓存剧集」入口（按线路）。
+  final void Function(int sourceIndex)? onDownloadEpisode;
 
   @override
   State<PlayerItem> createState() => _PlayerItemState();
@@ -77,6 +88,12 @@ class _PlayerItemState extends State<PlayerItem>
   Timer? playerTimer;
   Timer? mouseScrollerTimer;
   Timer? _adjustmentHudHideTimer;
+
+  /// 视频区（分屏后是容器左侧/上侧那块，比窗口窄）。
+  ///
+  /// 手势灵敏度、HUD 判据、弹幕 `compactLayout` 都必须按**它**算，而不是整窗
+  /// `MediaQuery`（v1 遗留：视频区被面板压窄后 seek 灵敏度仍按窗口宽算）。
+  final GlobalKey _videoRegionKey = GlobalKey();
   final Set<PlayerPanelHold> _playerPanelHolds = <PlayerPanelHold>{};
   PlayerPanelHold? _progressBarDragHold;
   PointerDeviceKind? _lastTapPointerKind;
@@ -86,6 +103,11 @@ class _PlayerItemState extends State<PlayerItem>
   late final AnimationController _screenshotFeedbackController;
   late final Animation<double> _screenshotFeedbackAnimation;
 
+  /// 截图候选（照 Kazumi：连续截图 → 挑选面板 → 批量保存）。
+  late final PlayerScreenshotController _screenshots =
+      playerController.screenshots;
+  bool _screenshotSheetOpen = false;
+
   double lastPlayerSpeed = 1.0;
   late double longPressPlaySpeed;
   int episodeNum = 0;
@@ -93,6 +115,7 @@ class _PlayerItemState extends State<PlayerItem>
   late mobx.ReactionDisposer _playerSizeListener;
 
   late mobx.ReactionDisposer _fullscreenListener;
+  late mobx.ReactionDisposer _pipListener;
 
   /// 处理 Android/iOS 应用后台或熄屏
   @override
@@ -198,6 +221,10 @@ class _PlayerItemState extends State<PlayerItem>
       'togglemute': () async => handleShortcutVolumeChange('mute'),
       'fullscreen': () => handleShortcutFullscreen(),
       'screenshot': () async => handleScreenshot(),
+      'toggledanmaku': () => playerController.danmaku
+          .setDanmakuEnabled(!playerController.danmaku.danmakuOn),
+      // 分屏面板开合（Esc 在 handleShortcutDown 里先退二级页再收面板）。
+      'togglesplitpanel': () => playerController.panel.toggleSplitPanel(),
       'skip': () async => skipOP(),
       'exitfullscreen': () => handleShortcutExitFullscreen(),
       'speed1': () async => setPlaybackSpeed(1.0),
@@ -224,6 +251,19 @@ class _PlayerItemState extends State<PlayerItem>
 
   //快捷键按下
   bool handleShortcutDown(String keyLabel) {
+    // Esc（桌面）：先退二级页，再收面板；面板没开时不拦截按键。
+    if (keyLabel == 'Escape') {
+      final panel = playerController.panel;
+      if (!panel.splitPanelVisible) {
+        return false;
+      }
+      if (panel.splitPanelSubPage != null) {
+        panel.closeSplitPanelSubPage();
+      } else {
+        panel.closeSplitPanel();
+      }
+      return true;
+    }
     for (final entry in keyboardShortcuts.entries) {
       final func = entry.key;
       final keys = entry.value;
@@ -509,36 +549,131 @@ class _PlayerItemState extends State<PlayerItem>
 
   //截图
   Future<void> handleScreenshot() async {
-    _playScreenshotFeedback();
-
-    if (isDesktop()) {
-      WywDialog.showToast(message: '桌面端暂未支持保存截图');
+    if (!mounted) return;
+    if (!isDesktop()) {
+      await _saveScreenshotToGallery();
       return;
     }
+    if (_screenshots.busy || _screenshotSheetOpen) return;
+    final source = videoPageController.currentSourceIndex;
+    final episode = videoPageController.currentEpisodeIndex;
+    final player = playerController.playback.mediaPlayer;
+    if (videoPageController.loading || player == null) {
+      WywDialog.showToast(message: '暂未获取到画面，请等视频显示后重试');
+      return;
+    }
+    final added = await _screenshots.capture(
+      capturePng: playerController.screenshotPng,
+      title: videoPageController.videoTitle,
+      episode: _screenshotEpisodeLabel(source, episode),
+      position: playerController.playback.playerPosition,
+      isCurrent: () =>
+          mounted &&
+          !videoPageController.loading &&
+          videoPageController.currentSourceIndex == source &&
+          videoPageController.currentEpisodeIndex == episode &&
+          identical(playerController.playback.mediaPlayer, player),
+    );
+    if (!mounted) return;
+    if (added) _playScreenshotFeedback();
+    if (!_screenshotSheetOpen) {
+      showVideoController();
+      if (!added || _screenshots.candidates.length == 1) {
+        WywDialog.showToast(
+          message: added
+              ? '已截取画面，点击右上角图库挑选保存'
+              : _screenshots.message ?? '截图失败，请重试',
+          showActionButton: _screenshots.candidates.isNotEmpty,
+          actionLabel: '挑选截图',
+          onActionPressed: showScreenshotCandidates,
+        );
+      }
+    }
+  }
 
+  /// 截图候选里显示的集名（取不到名字时退化成集号）。
+  String _screenshotEpisodeLabel(int sourceIndex, int episodeIndex) {
+    final sources = videoPageController.sources;
+    if (sourceIndex >= 0 && sourceIndex < sources.length) {
+      final episodes = sources[sourceIndex].episodes;
+      if (episodeIndex >= 0 && episodeIndex < episodes.length) {
+        final name = episodes[episodeIndex].name.trim();
+        if (name.isNotEmpty) return name;
+      }
+    }
+    return '第 ${episodeIndex + 1} 集';
+  }
+
+  /// 移动端：直接存相册（桌面端走候选 + 挑选面板）。
+  Future<void> _saveScreenshotToGallery() async {
+    _playScreenshotFeedback();
     try {
-      Uint8List? screenshot = await playerController.screenshotPng();
-
-      if (screenshot == null) {
+      final screenshot = await playerController.screenshotPng();
+      if (!mounted) return;
+      if (screenshot == null || screenshot.isEmpty) {
         WywDialog.showToast(message: '截图失败：未获取到图像');
         return;
       }
-
       final result = await SaverGallery.saveImage(
         screenshot,
         fileName: DateTime.timestamp().millisecondsSinceEpoch.toString(),
+        extension: 'png',
         skipIfExists: false,
       );
-      if (!result.isSuccess) {
+      if (mounted && !result.isSuccess) {
         WywDialog.showToast(message: '截图保存失败：${result.errorMessage}');
       }
     } catch (e) {
-      WywDialog.showToast(message: '截图失败：$e');
+      if (mounted) WywDialog.showToast(message: '截图失败：$e');
+    }
+  }
+
+  /// 桌面端：打开截图挑选面板（期间暂停播放，关闭后按原样恢复）。
+  Future<void> showScreenshotCandidates() async {
+    if (!isDesktop() || !mounted || _screenshotSheetOpen || _screenshots.busy) {
+      return;
+    }
+    _screenshotSheetOpen = true;
+    final hold = acquirePlayerPanelHold();
+    final player = playerController.playback.mediaPlayer;
+    final source = videoPageController.currentSourceIndex;
+    final episode = videoPageController.currentEpisodeIndex;
+    final resume = playerController.playback.playing;
+    final sleepRemaining = TimedShutdownService().remainingSecondsNotifier.value;
+    final sleepDeadline = sleepRemaining > 0
+        ? DateTime.now().add(Duration(seconds: sleepRemaining))
+        : null;
+    try {
+      if (resume) await playerController.pause(enableSync: false);
+      if (!mounted) return;
+      await showPlayerScreenshotSheet(context, controller: _screenshots);
+    } finally {
+      _screenshotSheetOpen = false;
+      if (mounted) {
+        hold.release();
+        widget.keyboardFocus.requestFocus();
+        // Resume only the same local playback, respecting the sleep timer.
+        if (resume &&
+            identical(player, playerController.playback.mediaPlayer) &&
+            videoPageController.currentSourceIndex == source &&
+            videoPageController.currentEpisodeIndex == episode &&
+            !videoPageController.loading &&
+            (sleepDeadline == null || DateTime.now().isBefore(sleepDeadline)) &&
+            WidgetsBinding.instance.lifecycleState ==
+                AppLifecycleState.resumed &&
+            (ModalRoute.of(context)?.isCurrent ?? false)) {
+          await playerController.play(enableSync: false);
+        }
+      } else {
+        hold.releaseSilently();
+      }
     }
   }
 
   void _playScreenshotFeedback() {
-    if (!mounted) {
+    if (!mounted ||
+        widget.disableAnimations ||
+        MediaQuery.disableAnimationsOf(context)) {
       return;
     }
     _screenshotFeedbackController.forward(from: 0);
@@ -794,11 +929,122 @@ class _PlayerItemState extends State<PlayerItem>
     hideTimer = null;
   }
 
+  /// 弹幕画布层。
+  ///
+  /// `DanmakuScreen` 建好画布后把控制器回调给 [PlayerDanmakuController]，
+  /// 之后投喂弹幕都走控制器，widget 树只负责提供画布与尺寸。
+  /// 整层从语义树摘掉：弹幕是纯画布文字（读屏读不到），且每条进出画布都会
+  /// 带动语义树，Windows 无障碍桥对高频变化的树会刷 AXTree 报错。
+  Widget _buildDanmakuLayer() {
+    return ExcludeSemantics(
+      child: DanmakuScreen<dynamic>(
+        createdController: (controller) {
+          playerController.danmaku.canvasController = controller;
+          // 画布刚建好时同步一次倍速：弹幕滚动时长要跟随当前播放速度。
+          playerController.danmaku
+              .updateDanmakuSpeed(playerController.playback.playerSpeed);
+        },
+        option: playerController.danmaku.resolveCanvasOption(
+          compactLayout:
+              (_videoViewportSize?.shortestSide ??
+                  MediaQuery.sizeOf(context).shortestSide) <
+              600,
+        ),
+      ),
+    );
+  }
+
+  /// 把当前播放秒数上的弹幕投进画布。
+  ///
+  /// 播放位置每秒轮询一次，同一秒内的多条弹幕按索引错峰 0~999ms 发出，避免
+  /// 齐刷刷糊成一片。延迟任务真正执行前要重新校验状态：跳转（generation 自增）、
+  /// 暂停、缓冲、关闭弹幕，任一命中就丢弃这一条，防止跳转后旧弹幕串场。
+  void _emitDanmakusForCurrentPosition() {
+    final danmaku = playerController.danmaku;
+    if (playerController.playback.currentPosition.inMicroseconds == 0 ||
+        playerController.playback.playerPlaying != true ||
+        !danmaku.danmakuOn ||
+        !danmaku.hasCanvas) {
+      return;
+    }
+
+    final entries = danmaku.danmakusForPlaybackPosition(
+      playerController.playback.currentPosition,
+    );
+    final total = entries.length;
+    // 每轮只取一次屏蔽词，别在循环里按条读存储。
+    final shieldRules = danmaku.shieldRules;
+    for (final entry in entries.asMap().entries) {
+      final index = entry.key;
+      final item = entry.value;
+      if (!danmaku.isSourceEnabled(item)) {
+        continue;
+      }
+      if (isDanmakuShielded(item.message, shieldRules)) {
+        continue;
+      }
+
+      final color = GStorage.getSetting(SettingsKeys.danmakuColor)
+          ? item.color
+          : MediaChromeColors.foreground;
+      final delay = DanmakuTimeline.staggerDelayMilliseconds(
+        index: index,
+        total: total,
+      );
+      final generation = danmaku.scheduledGeneration;
+      Future.delayed(Duration(milliseconds: delay), () {
+        if (!mounted ||
+            playerController.playback.playerPlaying != true ||
+            playerController.playback.playerBuffering ||
+            !danmaku.danmakuOn ||
+            danmaku.scheduledGeneration != generation) {
+          return;
+        }
+        danmaku.canvasController?.addDanmaku(
+          DanmakuContentItem(
+            item.message,
+            color: color,
+            type: _danmakuItemType(item),
+          ),
+        );
+      });
+    }
+  }
+
+  /// 弹弹play 的弹幕模式：1 滚动 / 4 底部 / 5 顶部。
+  DanmakuItemType _danmakuItemType(DanmakuEntry item) {
+    if (item.type == 4) {
+      return DanmakuItemType.bottom;
+    }
+    if (item.type == 5) {
+      return DanmakuItemType.top;
+    }
+    return DanmakuItemType.scroll;
+  }
+
   Timer getPlayerTimer() {
     return Timer.periodic(const Duration(seconds: 1), (timer) {
       playerController.syncPlaybackState();
+      // 续播点：播放中每秒落盘一次（照 Kazumi）。
+      // 门控与 Kazumi 一致＝播放中 + 非加载；「有没有可记录的身份」与「隐私
+      // 模式」由 reporter 和仓库各自把关。
+      if (playerController.playback.playerPlaying &&
+          !videoPageController.loading) {
+        playerController.reportPlaybackProgress();
+      }
       unawaited(_updateAndroidPIPActions());
       _syncAudioServiceState();
+      _emitDanmakusForCurrentPosition();
+      // 设置可能在播放页存活期间被改（后台播放/画中画/从设置页返回），
+      // 每秒比对一次并只在真的变化时应用到画布。
+      if (mounted) {
+        playerController.danmaku.syncCanvasOptionIfChanged(
+          compactLayout:
+              (_videoViewportSize?.shortestSide ??
+                  MediaQuery.sizeOf(context).shortestSide) <
+              600,
+        );
+      }
       // 音量相关
       if (!playerController.panel.volumeSeeking) {
         if (isDesktop()) {
@@ -819,159 +1065,9 @@ class _PlayerItemState extends State<PlayerItem>
     });
   }
 
-  Widget get videoInfoBody {
-    return Observer(builder: (context) {
-      return ListView(
-        children: [
-          ListTile(
-            title: const Text('Source'),
-            subtitle: Text(playerController.videoUrl),
-            onTap: () => copyToClipboard(playerController.videoUrl),
-          ),
-          ListTile(
-            title: const Text('Resolution'),
-            subtitle: Text(
-                '${playerController.debug.playerWidth}x${playerController.debug.playerHeight}'),
-            onTap: () => copyToClipboard(
-                'Resolution\n${playerController.debug.playerWidth}x${playerController.debug.playerHeight}'),
-          ),
-          ListTile(
-            title: const Text('VideoParams'),
-            subtitle: Text(playerController.debug.playerVideoParams.toString()),
-            onTap: () => copyToClipboard(
-                'VideoParams\n${playerController.debug.playerVideoParams.toString()}'),
-          ),
-          ListTile(
-            title: const Text('AudioParams'),
-            subtitle: Text(playerController.debug.playerAudioParams.toString()),
-            onTap: () => copyToClipboard(
-                'AudioParams\n${playerController.debug.playerAudioParams.toString()}'),
-          ),
-          ListTile(
-            title: const Text('Media'),
-            subtitle: Text(playerController.debug.playerPlaylist.toString()),
-            onTap: () => copyToClipboard(
-                'Media\n${playerController.debug.playerPlaylist.toString()}'),
-          ),
-          ListTile(
-            title: const Text('AudioTrack'),
-            subtitle: Text(playerController.debug.playerAudioTracks.toString()),
-            onTap: () => copyToClipboard(
-                'AudioTrack\n${playerController.debug.playerAudioTracks.toString()}'),
-          ),
-          ListTile(
-            title: const Text('VideoTrack'),
-            subtitle: Text(playerController.debug.playerVideoTracks.toString()),
-            onTap: () => copyToClipboard(
-                'VideoTrack\n${playerController.debug.playerVideoTracks.toString()}'),
-          ),
-          ListTile(
-            title: const Text('VideoBitrate'),
-            subtitle:
-                Text(playerController.debug.playerVideoBitrate.toString()),
-            onTap: () => copyToClipboard(
-                'VideoBitrate\n${playerController.debug.playerVideoBitrate.toString()}'),
-          ),
-          ListTile(
-            title: const Text('AudioBitrate'),
-            subtitle:
-                Text(playerController.debug.playerAudioBitrate.toString()),
-            onTap: () => copyToClipboard(
-                'AudioBitrate\n${playerController.debug.playerAudioBitrate.toString()}'),
-          ),
-        ],
-      );
-    });
-  }
-
-  Widget get videoDebugLogBody {
-    return Scaffold(
-      body: Padding(
-        padding: const EdgeInsets.fromLTRB(8.0, 8.0, 8.0, 0),
-        child: Observer(builder: (context) {
-          return ListView.builder(
-            itemCount: playerController.debug.playerLog.length,
-            itemBuilder: (context, index) {
-              return Text(playerController.debug.playerLog[index]);
-            },
-          );
-        }),
-      ),
-      floatingActionButton: FloatingActionButton(
-        child: const Icon(Icons.copy),
-        onPressed: () => copyToClipboard(
-            playerController.debug.playerLog.join('\n'),
-            toastMessage: null),
-      ),
-    );
-  }
-
-  void showVideoInfo() {
-    showAdaptiveBottomSheet<void>(
-      context: context,
-      builder: (context) {
-        return DefaultTabController(
-          length: 2,
-          child: Scaffold(
-            body: Column(
-              children: [
-                const PreferredSize(
-                  preferredSize: Size.fromHeight(kToolbarHeight),
-                  child: Material(
-                    child: TabBar(
-                      tabs: [
-                        Tab(text: '状态'),
-                        Tab(text: '日志'),
-                      ],
-                    ),
-                  ),
-                ),
-                Expanded(
-                  child: TabBarView(
-                    children: [
-                      videoInfoBody,
-                      videoDebugLogBody,
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  /// Used to decide which panel is used.
-  /// It's too complicated to write these in conditional sentence.
-  /// * true: use [PlayerItemPanel]
-  /// * false: use [SmallestPlayerItemPanel]
-  bool needFullPanel(BuildContext context) {
-    // windows too small, workaround for ohos floating window
-    if (MediaQuery.sizeOf(context).width < LayoutBreakpoint.compact['width']!) {
-      return false;
-    }
-    // in desktop pip mode
-    if (videoPageController.isPip) {
-      return false;
-    }
-    // does not meet Google's phone landscape height and tablet landscape width requirements.
-    if (!isDesktop() &&
-        (MediaQuery.sizeOf(context).height >
-                LayoutBreakpoint.compact['height']! &&
-            MediaQuery.sizeOf(context).width <
-                LayoutBreakpoint.medium['width']!)) {
-      return false;
-    }
-    if (isDesktop() &&
-        (MediaQuery.sizeOf(context).height >
-                LayoutBreakpoint.compact['height']! &&
-            MediaQuery.sizeOf(context).width <
-                LayoutBreakpoint.compact['width']!)) {
-      return false;
-    }
-    return true;
-  }
+  // 面板由 PlayerItemPanel 一份承担：它按「可用宽度 < 600」自行决定窄屏/宽屏布局，
+  // 因此这里不再需要"选哪份面板"的判断（原 needFullPanel 的四个分支已被
+  // LayoutBuilder 的单一宽度判据取代）。
 
   @override
   void onWindowRestore() {}
@@ -980,9 +1076,19 @@ class _PlayerItemState extends State<PlayerItem>
   void initState() {
     super.initState();
     playerController = widget.playerController;
+    // 画面调节：把预设控制器的实时下发接到本播放器（切换/编辑/删除实时生效）
+    VideoFilterController.instance.applyVf =
+        (params) => playerController.setVideoFilter(params);
+    // 弹幕默认开关：进播放页时按设置初始化；真实数据加载后（匹配到弹幕库）
+    // 会以"有没有弹幕"再校正一次。
+    playerController.danmaku.setDanmakuEnabled(
+      GStorage.getSetting(SettingsKeys.danmakuEnabledByDefault),
+    );
     _loadShortcuts();
     _initKeyboardActions();
     _initPlayerMenu();
+    // 分屏面板：比例是持久化偏好，进页面时读一次（`0` = 未自定义）。
+    playerController.panel.loadSplitPanelExtent();
     _fullscreenListener = mobx.reaction<bool>(
       (_) => videoPageController.isFullscreen,
       (_) {
@@ -994,6 +1100,15 @@ class _PlayerItemState extends State<PlayerItem>
           '${playerController.debug.playerWidth}:${playerController.debug.playerHeight}',
       (_) {
         unawaited(_syncPIPAspectWhenVideoSizeReady());
+      },
+    );
+    // 画中画：进入时自动收起面板；退出不自动恢复（避免干扰）。
+    _pipListener = mobx.reaction<bool>(
+      (_) => videoPageController.isPip,
+      (isPip) {
+        if (isPip) {
+          playerController.panel.closeSplitPanel();
+        }
       },
     );
     if (Platform.isAndroid) {
@@ -1052,6 +1167,7 @@ class _PlayerItemState extends State<PlayerItem>
     // This widget only detaches UI listeners and timers.
     _fullscreenListener();
     _playerSizeListener();
+    _pipListener();
     WidgetsBinding.instance.removeObserver(this);
     windowManager.removeListener(this);
     playerController.seeking.invalidateInteractiveSeek();
@@ -1066,7 +1182,12 @@ class _PlayerItemState extends State<PlayerItem>
       unawaited(_syncAndroidPIPPlayerPageState(false));
       PipUtils.disposePipHandler();
     }
+    // 分屏面板：先把防抖窗口内的比例落盘，再取消定时器（v1 的定时器在
+    // dispose 没取消，页面卸载后还会写存储）。
+    unawaited(playerController.panel.flushSplitPanelExtent());
+    playerController.panel.disposeSplitPanelPersistence();
     playerController.panel.reset();
+    VideoFilterController.instance.applyVf = null;
     super.dispose();
   }
 
@@ -1074,73 +1195,153 @@ class _PlayerItemState extends State<PlayerItem>
   Widget build(BuildContext context) {
     return Observer(
       builder: (context) {
+        // 视频区与面板各自只构造**一次实例**：下面的几何 Observer 会在拖动
+        // 分界线时逐帧重建，但这两个 widget 实例不变，Flutter 会直接跳过它们的
+        // 子树重建（否则每拖一帧都要重建整页 + 整个面板内容 → 手感发黏）。
+        final videoRegion = _buildVideoRegion(context);
+        final panelRegion = Observer(
+          builder: (context) {
+            final panel = playerController.panel;
+            return PlayerSplitPanel(
+              host: _splitTabHost,
+              tab: panel.splitPanelTab,
+              subPage: panel.splitPanelSubPage,
+              onTabChanged: panel.setSplitPanelTab,
+              onClose: panel.closeSplitPanel,
+              onBack: panel.closeSplitPanelSubPage,
+            );
+          },
+        );
         return ClipRect(
           child: Container(
             color: MediaChromeColors.surface,
-            child: MouseRegion(
-              cursor: (videoPageController.isFullscreen &&
-                      !playerController.panel.showVideoController)
-                  ? SystemMouseCursors.none
-                  : SystemMouseCursors.basic,
-              onHover: (PointerEvent pointerEvent) {
-                // workaround for android.
-                // I don't know why, but android tap event will trigger onHover event.
-                if (isDesktop()) {
-                  if (pointerEvent.position.dy > 50 &&
-                      pointerEvent.position.dy <
-                          MediaQuery.of(context).size.height - 70) {
-                    displayVideoController();
-                  } else {
-                    if (!playerController.panel.showVideoController) {
-                      _panelVisibilityController.forward();
-                      playerController.panel.showVideoController = true;
-                    }
-                  }
-                }
-              },
-              child: Listener(
-                onPointerSignal: (pointerSignal) {
-                  if (pointerSignal is PointerScrollEvent) {
-                    _handleMouseScroller();
-                    final scrollDelta = pointerSignal.scrollDelta;
-                    final double volume =
-                        playerController.playback.volume - scrollDelta.dy / 60;
-                    playerController.setVolume(volume);
-                  }
+            child: SizedBox(
+              height: videoPageController.isFullscreen ||
+                      videoPageController.isPip
+                  ? (MediaQuery.of(context).size.height)
+                  : (MediaQuery.of(context).size.width * 9.0 / (16.0)),
+              width: MediaQuery.of(context).size.width,
+              // 几何相关的 observable 只在这里读：拖动时只重建布局壳，
+              // 不波及视频区与面板内容。
+              child: Observer(
+                builder: (context) {
+                  final panel = playerController.panel;
+                  return PlayerSplitLayout(
+                    visible: panel.splitPanelVisible,
+                    storedLandscapeWidth: panel.splitPanelWidth,
+                    storedPortraitFraction: panel.splitPanelHeightFraction,
+                    disableAnimations: widget.disableAnimations,
+                    onExtentChanged: panel.setSplitPanelExtent,
+                    onExtentReset: panel.resetSplitPanelExtent,
+                    video: videoRegion,
+                    panel: panelRegion,
+                  );
                 },
-                child: SizedBox(
-                  height: videoPageController.isFullscreen ||
-                          videoPageController.isPip
-                      ? (MediaQuery.of(context).size.height)
-                      : (MediaQuery.of(context).size.width * 9.0 / (16.0)),
-                  width: MediaQuery.of(context).size.width,
-                  child: Stack(alignment: Alignment.center, children: [
-                    _buildVideoSurface(),
-                    (playerController.playback.isBuffering ||
-                            videoPageController.loading)
-                        ? const Positioned.fill(
-                            child: Center(
-                              child: CircularProgressIndicator(),
-                            ),
-                          )
-                        : Container(),
-                    _buildTapGestureLayer(),
-                    Positioned.fill(
-                      child: PlayerScreenshotFeedbackOverlay(
-                        animation: _screenshotFeedbackAnimation,
-                      ),
-                    ),
-                    // 播放器控制面板
-                    _buildControlPanels(),
-                    // 播放器手势控制
-                    _buildGestureControls(),
-                  ]),
-                ),
               ),
             ),
           ),
         );
       },
+    );
+  }
+
+  /// 分屏面板各 tab 的宿主（值对象，每次 build 重新构造，很便宜）。
+  SplitTabHost get _splitTabHost => SplitTabHost(
+        playerController: playerController,
+        videoPageController: videoPageController,
+        disableAnimations: widget.disableAnimations,
+        setPlaybackSpeed: setPlaybackSpeed,
+        handleSuperResolutionChange: handleSuperResolutionChange,
+        skipOP: skipOP,
+        handleScreenshot: handleScreenshot,
+        showScreenshotCandidates: showScreenshotCandidates,
+        pauseForTimedShutdown: widget.pauseForTimedShutdown,
+        onEpisodeSelected: widget.onEpisodeSelected,
+        onDownloadEpisode: widget.onDownloadEpisode,
+      );
+
+  /// 视频区实测尺寸；布局首帧可能还拿不到，此时返回 `null`（调用方回落到整窗值）。
+  Size? get _videoViewportSize {
+    final box = _videoRegionKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) {
+      return null;
+    }
+    return box.size;
+  }
+
+  /// 视频区：画面 + 覆盖层 + 控制面板。
+  ///
+  /// 悬停与滚轮**只挂在本区**：v1 把它们挂在整容器上，导致在右侧面板区域
+  /// 滚动也会改音量（真 bug）。分屏后视频区与面板区是两个独立子树，问题消失。
+  Widget _buildVideoRegion(BuildContext context) {
+    return MouseRegion(
+      key: _videoRegionKey,
+      cursor: (videoPageController.isFullscreen &&
+              !playerController.panel.showVideoController)
+          ? SystemMouseCursors.none
+          : SystemMouseCursors.basic,
+      onHover: (PointerEvent pointerEvent) {
+        // workaround for android.
+        // I don't know why, but android tap event will trigger onHover event.
+        if (isDesktop()) {
+          // 判据用**视频区**局部坐标：分屏后视频区比窗口窄/矮，整窗判据会在
+          // 面板区域误判控制栏显隐。
+          final box =
+              _videoRegionKey.currentContext?.findRenderObject() as RenderBox?;
+          final hasBox = box != null && box.hasSize;
+          final localDy = hasBox
+              ? box.globalToLocal(pointerEvent.position).dy
+              : pointerEvent.position.dy;
+          final regionHeight = hasBox
+              ? box.size.height
+              : MediaQuery.of(context).size.height;
+          if (localDy > 50 && localDy < regionHeight - 70) {
+            displayVideoController();
+          } else {
+            if (!playerController.panel.showVideoController) {
+              _panelVisibilityController.forward();
+              playerController.panel.showVideoController = true;
+            }
+          }
+        }
+      },
+      child: Listener(
+        onPointerSignal: (pointerSignal) {
+          if (pointerSignal is PointerScrollEvent) {
+            _handleMouseScroller();
+            final scrollDelta = pointerSignal.scrollDelta;
+            final double volume =
+                playerController.playback.volume - scrollDelta.dy / 60;
+            playerController.setVolume(volume);
+          }
+        },
+        child: Stack(alignment: Alignment.center, children: [
+          _buildVideoSurface(),
+          (playerController.playback.isBuffering ||
+                  videoPageController.loading)
+              ? const Positioned.fill(
+                  child: ExcludeSemantics(
+                    child: Center(
+                      child: CircularProgressIndicator(),
+                    ),
+                  ),
+                )
+              : Container(),
+          _buildTapGestureLayer(),
+          // 弹幕层：必须在视频表面之上、控制面板之下，
+          // 否则弹幕会盖住控制条。
+          Positioned.fill(child: _buildDanmakuLayer()),
+          Positioned.fill(
+            child: PlayerScreenshotFeedbackOverlay(
+              animation: _screenshotFeedbackAnimation,
+            ),
+          ),
+          // 播放器控制面板
+          _buildControlPanels(),
+          // 播放器手势控制
+          _buildGestureControls(),
+        ]),
+      ),
     );
   }
 
@@ -1225,42 +1426,26 @@ class _PlayerItemState extends State<PlayerItem>
     );
   }
 
-  /// 播放器控制面板：桌面端完整面板 / 移动端精简面板。
+  /// 播放器控制面板。
+  ///
+  /// 只有一份面板：窄屏/宽屏由它内部按可用宽度自行切换（见 `PlayerItemPanel`）。
   Widget _buildControlPanels() {
-    if (needFullPanel(context)) {
-      return PlayerItemPanel(
-        playerController: playerController,
-        onBackPressed: widget.onBackPressed,
-        setPlaybackSpeed: setPlaybackSpeed,
-        handleFullscreen: handleFullscreen,
-        handleProgressBarDragStart: handleProgressBarDragStart,
-        handleProgressBarSeek: handleProgressBarSeek,
-        handleSuperResolutionChange: handleSuperResolutionChange,
-        panelVisibilityController: _panelVisibilityController,
-        acquirePlayerPanelHold: acquirePlayerPanelHold,
-        showVideoInfo: showVideoInfo,
-        pauseForTimedShutdown: widget.pauseForTimedShutdown,
-        disableAnimations: widget.disableAnimations,
-        handleScreenShot: handleScreenshot,
-        skipOP: skipOP,
-        toggleEpisodePanel: widget.toggleEpisodePanel,
-      );
-    }
-    return SmallestPlayerItemPanel(
+    return PlayerItemPanel(
       playerController: playerController,
       onBackPressed: widget.onBackPressed,
       setPlaybackSpeed: setPlaybackSpeed,
       handleFullscreen: handleFullscreen,
       handleProgressBarDragStart: handleProgressBarDragStart,
       handleProgressBarSeek: handleProgressBarSeek,
-      handleSuperResolutionChange: handleSuperResolutionChange,
       panelVisibilityController: _panelVisibilityController,
       acquirePlayerPanelHold: acquirePlayerPanelHold,
-      showVideoInfo: showVideoInfo,
       pauseForTimedShutdown: widget.pauseForTimedShutdown,
       disableAnimations: widget.disableAnimations,
+      handleScreenShot: handleScreenshot,
+      showScreenshotCandidates: showScreenshotCandidates,
       skipOP: skipOP,
-      toggleEpisodePanel: widget.toggleEpisodePanel,
+      splitPanelVisible: playerController.panel.splitPanelVisible,
+      toggleSplitPanel: playerController.panel.toggleSplitPanel,
     );
   }
 
@@ -1284,7 +1469,11 @@ class _PlayerItemState extends State<PlayerItem>
                   playerController.panel.seekDirection =
                       details.delta.dx > 0 ? 1 : -1;
                 }
-                final double scale = 180000 / MediaQuery.sizeOf(context).width;
+                // 按视频区实测宽度换算：面板占掉一部分后，同样的拖动距离
+                // 必须对应同样的**视频内**进度比例。
+                final double scale = 180000 /
+                    (_videoViewportSize?.width ??
+                        MediaQuery.sizeOf(context).width);
                 playerController.seeking.updateInteractiveSeek(
                   playerController.playback.currentPosition +
                       Duration(

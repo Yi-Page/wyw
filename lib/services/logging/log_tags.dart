@@ -47,4 +47,7 @@ abstract final class LogTag {
 
   /// 平台环境（窗口、全屏、显示器模式等平台能力）
   static const platform = '[Platform]';
+
+  /// 弹幕（弹弹play 搜索/详情/弹幕拉取）
+  static const danmaku = '[Danmaku]';
 }

@@ -1,5 +1,7 @@
 import 'package:hive_ce/hive.dart';
 
+import 'package:wyw/services/storage/video_code.dart';
+
 part 'download_module.g.dart';
 
 @HiveType(typeId: 7)
@@ -30,6 +32,18 @@ class DownloadRecord {
   @HiveField(7, defaultValue: '')
   String sourceKey;
 
+  /// 归属的**进度记录 code**（作品级身份，见 `VideoCode`）。
+  ///
+  /// 下载记录与进度记录之间的唯一引用：由它可反查进度记录（含完整源/集列表），
+  /// 进度侧也可由 code 反查本记录。空串表示"无法关联"（`code` 字段加入之前
+  /// 创建的老记录，且 `sourceKey`/`videoId` 也为空），按无进度处理。
+  @HiveField(8, defaultValue: '')
+  String code;
+
+  /// 记录自身的 code（老记录从 sourceKey/videoId 派生）。
+  String get effectiveCode =>
+      VideoCode.ofRecord(code: code, sourceKey: sourceKey, videoId: videoId);
+
   String get key => '${pluginName}_$mediaId';
 
   DownloadRecord(
@@ -41,6 +55,7 @@ class DownloadRecord {
     this.createdAt, {
     this.videoId = '',
     this.sourceKey = '',
+    this.code = '',
   });
 }
 
@@ -143,3 +158,10 @@ int sourceIndexOf(int episodeNumber) => episodeNumber ~/ 100000 - 1;
 
 /// 从全局唯一 episodeNumber 反解出集数 index（0-based）。
 int episodeIndexOf(int episodeNumber) => episodeNumber % 100000 - 1;
+
+/// 选集面板里「剧集 → 下载任务」映射的键（线路:集数，均 0-based）。
+///
+/// Kazumi 那边用剧集页 URL 当这个键；wyw 的 [DownloadEpisode] 没有 URL 字段，
+/// 但带结构化线路/集数，所以用索引当键（见 `DownloadController.episodeDownloadsFor`）。
+String episodeDownloadKey(int sourceIndex, int episodeIndex) =>
+    '$sourceIndex:$episodeIndex';

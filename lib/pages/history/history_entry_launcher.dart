@@ -1,23 +1,29 @@
 // ignore_for_file: use_build_context_synchronously
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_mobx/flutter_mobx.dart';
 import 'package:flutter_modular/flutter_modular.dart';
 import 'package:wyw/bean/dialog/adaptive_bottom_sheet.dart';
 import 'package:wyw/bean/dialog/dialog_helper.dart';
-import 'package:wyw/bean/widget/video_episode_panel.dart';
+import 'package:wyw/modules/download/download_module.dart';
+import 'package:wyw/pages/download/download_episode_sheet.dart';
+import 'package:wyw/pages/video/episode_selection_panel.dart';
 import 'package:wyw/pages/comic_reader/comic_reader_page.dart';
 import 'package:wyw/pages/comic_reader/models/comic_reader_types.dart';
 import 'package:wyw/pages/download/download_controller.dart';
 import 'package:wyw/pages/novel_reader/models/novel_reader_types.dart';
 import 'package:wyw/pages/novel_reader/novel_reader_page.dart';
 import 'package:wyw/pages/plugin/plugin_controller.dart';
-import 'package:wyw/pages/video/video_route_args.dart';
+import 'package:wyw/pages/video/video_entry_launcher.dart';
 import 'package:wyw/repositories/i_history_repository.dart';
 import 'package:wyw/services/logging/log_tags.dart';
 import 'package:wyw/services/logging/logger.dart';
 import 'package:wyw/services/storage/history_entry.dart';
 import 'package:wyw/services/storage/history_progress.dart';
 import 'package:wyw/services/storage/history_type.dart';
+import 'package:wyw/services/storage/video_code.dart';
 import 'package:wyw/services/storage/video_play_model.dart';
 import 'package:wyw/services/video_source/resolution_service.dart';
 
@@ -46,51 +52,9 @@ class HistoryEntryLauncher {
       WywDialog.showToast(message: '暂不支持该类型的续播');
       return;
     }
-    final progress = entry.parseProgress();
-    if (progress is! VideoPlaybackProgress) {
-      WywDialog.showToast(message: '未找到可用播放入口');
-      return;
-    }
-    if (progress.sources.isEmpty && progress.videoUrl.isEmpty) {
-      WywDialog.showToast(message: '未找到可用播放入口');
-      return;
-    }
-    // 直接续播上次看到的集（sources 为空时回退直链）
-    final resumeSource = progress.sources.isEmpty
-        ? 0
-        : progress.lastSourceIndex.clamp(0, progress.sources.length - 1);
-    final resumeEpisode = progress.sources.isEmpty
-        ? 0
-        : progress.lastEpisodeIndex.clamp(
-            0,
-            progress.sources[resumeSource].episodes.length - 1,
-          );
-    final resumeEp = progress.sources.isEmpty
-        ? null
-        : progress.sources[resumeSource].episodes[resumeEpisode];
-    context.pushNamed(
-      '/video/',
-      arguments: VideoPageRouteArgs(
-        videoId: progress.videoId,
-        title: entry.title,
-        cover: entry.cover,
-        sourceKey: progress.sourceKey.isEmpty ? null : progress.sourceKey,
-        sources: progress.sources,
-        initialSource: resumeSource,
-        initialEpisode: resumeEpisode,
-        offsetMs: resumeEp?.positionMs ?? 0,
-        onProgressChanged: (p) {
-          // 历史续播同样回写进度（含重新解析出的直链），否则观看后记录不更新
-          inject<IHistoryRepository>().setProgress(
-            type: HistoryType.video,
-            sourceId: entry.sourceId,
-            title: entry.title,
-            cover: entry.cover,
-            progress: p.toMap(),
-          );
-        },
-      ),
-    );
+    // 进播放页的参数处理（进度回填 / 决策 / 构造路由参数）统一交给编排层：
+    // 记录本身即骨架（完整源/集列表），因此这里不再自己拼 key 与 args。
+    await VideoEntryLauncher(context).openFromHistory(entry);
   }
 
   /// 弹出选集/线路面板，选中某集后进入播放页。
@@ -100,29 +64,10 @@ class HistoryEntryLauncher {
     final selected = await _pickEpisode(progress);
     if (selected == null) return;
     final (source, episode) = selected;
-    final ep = progress.sources[source].episodes[episode];
-    context.pushNamed(
-      '/video/',
-      arguments: VideoPageRouteArgs(
-        videoId: progress.videoId,
-        title: entry.title,
-        cover: entry.cover,
-        sourceKey: progress.sourceKey.isEmpty ? null : progress.sourceKey,
-        sources: progress.sources,
-        initialSource: source,
-        initialEpisode: episode,
-        offsetMs: ep.positionMs,
-        onProgressChanged: (p) {
-          // 历史选集续播同样回写进度（含重新解析出的直链）
-          inject<IHistoryRepository>().setProgress(
-            type: HistoryType.video,
-            sourceId: entry.sourceId,
-            title: entry.title,
-            cover: entry.cover,
-            progress: p.toMap(),
-          );
-        },
-      ),
+    await VideoEntryLauncher(context).openFromHistory(
+      entry,
+      sourceIndex: source,
+      episodeIndex: episode,
     );
   }
 
@@ -241,77 +186,134 @@ class HistoryEntryLauncher {
   Future<(int, int)?> _pickEpisode(VideoPlaybackProgress progress) async {
     return showAdaptiveBottomSheet<(int, int)>(
       context: context,
-      builder: (sheetContext) => SizedBox(
-        height: MediaQuery.sizeOf(sheetContext).height * 0.6,
-        child: VideoEpisodePanel(
-          title: entry.title,
-          sources: progress.sources,
-          currentSourceIndex: progress.lastSourceIndex,
-          currentEpisodeIndex: progress.lastEpisodeIndex,
-          onEpisodeTap: (s, e) => Navigator.of(sheetContext).pop((s, e)),
-          sourceKey: progress.sourceKey,
-          videoId: progress.videoId,
-          onDownloadEpisode: (s, e) async {
-            final src =
-                progress.sources[s.clamp(0, progress.sources.length - 1)];
-            final ep = src.episodes[e.clamp(0, src.episodes.length - 1)];
-            final downloadController = inject<DownloadController>();
-            // 下载不负责解析：先经解析服务拿成品直链（缓存直链直接用）。
-            // 生命周期三段式：预创建（resolving，下载页立即可见）→ 解析 → 入队/标记失败。
-            var mediaUrl = ep.resolvedUrl.isNotEmpty ? ep.resolvedUrl : '';
-            final needsResolve =
-                mediaUrl.isEmpty && ep.path.type != PlayPathType.direct;
-            if (needsResolve) {
-              await downloadController.prepareStructuredEpisode(
-                sourceKey: progress.sourceKey,
-                videoId: progress.videoId,
-                title: entry.title,
-                cover: entry.cover,
-                sourceIndex: s,
-                episodeIndex: e,
-                episodeName: ep.name,
-                sourceName: src.name,
-              );
-            } else if (mediaUrl.isEmpty) {
-              mediaUrl = ep.path.url;
-            }
-            if (needsResolve) {
-              final resolver = ResolutionService(
-                  pluginController: inject<PluginController>());
-              try {
-                mediaUrl = (await resolver.resolve(ep.path)).url;
-              } catch (err) {
-                WywLogger().w('${LogTag.download} 下载前解析播放地址失败 name=${ep.name}',
-                    error: err);
-                await downloadController.failPreparedEpisode(
-                  sourceKey: progress.sourceKey,
-                  videoId: progress.videoId,
-                  sourceIndex: s,
-                  episodeIndex: e,
-                  message: '解析播放地址失败',
-                );
-                WywDialog.showToast(message: '解析播放地址失败，无法下载');
-                return;
-              } finally {
-                await resolver.dispose();
-              }
-            }
-            final ok = await downloadController.downloadStructuredEpisode(
-              sourceKey: progress.sourceKey,
-              videoId: progress.videoId,
-              title: entry.title,
-              cover: entry.cover,
-              sourceIndex: s,
-              episodeIndex: e,
-              episodeName: ep.name,
-              sourceName: src.name,
-              resolvedUrl: mediaUrl,
-            );
-            WywDialog.showToast(message: ok ? '已加入下载队列' : '下载失败');
-          },
+      // 与播放页的选集 sheet 一致：内容盒放开到窗口（maxHeightFactor 1.0），
+      // 面板高 0.9 才是真正的窗口比例。
+      maxHeightFactor: 1.0,
+      // 与播放页的选集 sheet 一致：面板底用 surface（M3 modal sheet 默认是
+      // surfaceContainerLow，会把面板染深一档）。
+            builder: (sheetContext) => SizedBox(
+        height: MediaQuery.sizeOf(sheetContext).height * 0.9,
+        // 下载状态必须动态：把这个 sheet 的 builder 只跑一次，
+        // 所以 downloads 要放在 Observer 内取（否则面板永远停在打开那一刻）。
+        child: Observer(
+          builder: (context) => EpisodeSelectionPanel(
+            title: entry.title,
+            roads: progress.sources,
+            selectedRoad: progress.lastSourceIndex,
+            selectedEpisode: progress.lastEpisodeIndex + 1,
+            downloads: _episodeDownloads(progress),
+            onEpisodeSelected: (episode, road) =>
+                Navigator.of(sheetContext).pop((road, episode - 1)),
+            onDownload: (road) =>
+                unawaited(_showDownloadEpisodeSheet(progress, road)),
+            disableAnimations: MediaQuery.disableAnimationsOf(context),
+          ),
         ),
       ),
     );
+  }
+
+  /// 本记录的作品级 code（进度记录 `sourceId` 优先，回退从记录字段派生）。
+  String _codeOf(VideoPlaybackProgress progress) => entry.sourceId.isNotEmpty
+      ? entry.sourceId
+      : VideoCode.of(
+          pluginName: progress.sourceKey,
+          videoId: progress.videoId,
+        );
+
+  /// 本作每集的下载任务（键为 `线路:集数`），供面板回显下载状态。
+  Map<String, DownloadEpisode> _episodeDownloads(
+    VideoPlaybackProgress progress,
+  ) =>
+      inject<DownloadController>().episodeDownloadsFor(
+        code: _codeOf(progress),
+      );
+
+  /// 「缓存剧集」：批量选集下载（历史页没有播放页控制器，逐集回调到这里）。
+  Future<void> _showDownloadEpisodeSheet(
+    VideoPlaybackProgress progress,
+    int road,
+  ) {
+    return showAdaptiveBottomSheet<void>(
+      context: context,
+      // 与播放页同一处理：内容盒放开到窗口，面板内比例即窗口比例
+      // （0.5 初始/最小、0.8 最高，小于父面板的 0.9）。
+      maxHeightFactor: 1.0,
+            builder: (sheetContext) => Observer(
+        // 同上：下载任务在 Observer 内取，缓存进度/已缓存集合才会实时刷新。
+        builder: (context) => DownloadEpisodeSheet(
+          road: road,
+          roads: progress.sources,
+          downloads: _episodeDownloads(progress),
+          initialEpisodeIndex: progress.lastEpisodeIndex,
+          onDownloadEpisode: (s, e) =>
+              unawaited(_downloadEpisode(progress, s, e)),
+        ),
+      ),
+    );
+  }
+
+  /// 下载某一集（0-based）：预创建（resolving）→ 解析 → 入队/标记失败。
+  Future<void> _downloadEpisode(
+    VideoPlaybackProgress progress,
+    int s,
+    int e,
+  ) async {
+    final src = progress.sources[s.clamp(0, progress.sources.length - 1)];
+    final ep = src.episodes[e.clamp(0, src.episodes.length - 1)];
+    final downloadController = inject<DownloadController>();
+    final code = _codeOf(progress);
+    var mediaUrl = ep.resolvedUrl.isNotEmpty ? ep.resolvedUrl : '';
+    final needsResolve =
+        mediaUrl.isEmpty && ep.path.type != PlayPathType.direct;
+    if (needsResolve) {
+      await downloadController.prepareStructuredEpisode(
+        code: code,
+        sourceKey: progress.sourceKey,
+        videoId: progress.videoId,
+        title: entry.title,
+        cover: entry.cover,
+        sourceIndex: s,
+        episodeIndex: e,
+        episodeName: ep.name,
+        sourceName: src.name,
+      );
+    } else if (mediaUrl.isEmpty) {
+      mediaUrl = ep.path.url;
+    }
+    if (needsResolve) {
+      final resolver =
+          ResolutionService(pluginController: inject<PluginController>());
+      try {
+        mediaUrl = (await resolver.resolve(ep.path)).url;
+      } catch (err) {
+        WywLogger()
+            .w('${LogTag.download} 下载前解析播放地址失败 name=${ep.name}', error: err);
+        await downloadController.failPreparedEpisode(
+          code: code,
+          sourceIndex: s,
+          episodeIndex: e,
+          message: '解析播放地址失败',
+        );
+        WywDialog.showToast(message: '解析播放地址失败，无法下载');
+        return;
+      } finally {
+        await resolver.dispose();
+      }
+    }
+    final ok = await downloadController.downloadStructuredEpisode(
+      code: code,
+      sourceKey: progress.sourceKey,
+      videoId: progress.videoId,
+      title: entry.title,
+      cover: entry.cover,
+      sourceIndex: s,
+      episodeIndex: e,
+      episodeName: ep.name,
+      sourceName: src.name,
+      resolvedUrl: mediaUrl,
+    );
+    WywDialog.showToast(message: ok ? '已加入下载队列' : '下载失败');
   }
 
   /// 弹出章节/线路面板，返回用户选中的章 index（0-based）。
@@ -377,7 +379,7 @@ class HistoryEntryLauncher {
     List<dynamic> args,
   ) async {
     final plugin = inject<PluginController>().getPlugin(pluginName);
-    if (plugin == null || !plugin.isRegistered) {
+    if (plugin == null || !plugin.isLoaded) {
       throw '插件 $pluginName 未注册';
     }
     final raw = await plugin.invoke(method, args);
@@ -410,7 +412,7 @@ class HistoryEntryLauncher {
     List<dynamic> args,
   ) async {
     final plugin = inject<PluginController>().getPlugin(pluginName);
-    if (plugin == null || !plugin.isRegistered) {
+    if (plugin == null || !plugin.isLoaded) {
       throw '插件 $pluginName 未注册';
     }
     final raw = await plugin.invoke(method, args);

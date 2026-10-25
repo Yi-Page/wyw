@@ -3,7 +3,7 @@ import 'package:flutter_mobx/flutter_mobx.dart';
 import 'package:flutter_modular/flutter_modular.dart';
 import 'package:wyw/pages/plugin/plugin_controller.dart';
 import 'package:wyw/plugins/plugin.dart';
-import 'package:wyw/plugins/plugin_type.dart';
+import 'package:wyw/plugins/plugin_category.dart';
 import 'package:wyw/bean/appbar/app_bar_menu_button.dart';
 import 'package:wyw/bean/appbar/sys_app_bar.dart';
 import 'package:wyw/bean/dialog/dialog_helper.dart';
@@ -38,7 +38,7 @@ class _SearchPageState extends State<SearchPage> with TickerProviderStateMixin {
   TabController? _tabController;
 
   /// 当前分类筛选（null = 全部）
-  PluginType? _selectedCategory;
+  PluginCategory? _selectedCategory;
 
   /// 聚合区块的展开状态（默认折叠：只展示一行结果）。
   final Set<String> _expandedSections = {};
@@ -67,11 +67,13 @@ class _SearchPageState extends State<SearchPage> with TickerProviderStateMixin {
     _rebuildTabController();
   }
 
-  /// 当前分类筛选下的可见插件（已启用 + 分类过滤；禁用插件不在 plugins 中）。
+  /// 当前分类筛选下的可见插件（已启用且已注册；禁用 / 加载失败的插件不在其中）。
   List<Plugin> _visiblePlugins() {
-    final all = _pluginController.plugins;
-    if (_selectedCategory == null) return all.toList();
-    return all.where((p) => p.type == _selectedCategory).toList();
+    final all = _pluginController.readyPlugins;
+    if (_selectedCategory == null) return all;
+    return all
+        .where((p) => _pluginController.categoryOf(p) == _selectedCategory)
+        .toList();
   }
 
   /// tab 单元 key 的有序列表：首位是聚合 tab（全部），其后是各插件名。
@@ -133,10 +135,10 @@ class _SearchPageState extends State<SearchPage> with TickerProviderStateMixin {
   }
 
   /// 切换分类筛选
-  void _selectCategory(PluginType? type) {
-    if (_selectedCategory == type) return;
+  void _selectCategory(PluginCategory? category) {
+    if (_selectedCategory == category) return;
     setState(() {
-      _selectedCategory = type;
+      _selectedCategory = category;
       _aggregateSelection = null; // 分类变了，选择重置为「全部」
     });
     _rebuildTabController(force: true);
@@ -265,8 +267,7 @@ class _SearchPageState extends State<SearchPage> with TickerProviderStateMixin {
             final plugins = _pluginController.plugins;
             final visible = _visiblePlugins();
             final keys = _tabKeys();
-            final hasDisabled =
-                _pluginController.disabledPluginNames.isNotEmpty;
+            final hasDisabled = plugins.any((p) => !p.enabled);
             // tab 单元数变化（plugins 加载 / 分类切换）时重建 tabController
             if (_tabController == null ||
                 _tabController!.length != keys.length) {
@@ -373,11 +374,11 @@ class _SearchPageState extends State<SearchPage> with TickerProviderStateMixin {
       // 有结果：直接消费 Widget 列表（A 方案）
       return SelectableRegion(
           selectionControls: materialTextSelectionControls,
-          child: _buildResultsGrid(pluginName, state));
+          child: _buildResultsList(pluginName, state));
     });
   }
 
-  /// 结果网格 + 无限滚动 + 底部 footer。
+  /// 结果列表 + 无限滚动 + 底部 footer。
   ///
   /// 滚动接近底部（距底部 200px）时触发 `loadMore`；`loadMore` 内部有
   /// `loadingMore`/`hasMore` 防重，重复触发安全。
@@ -385,10 +386,10 @@ class _SearchPageState extends State<SearchPage> with TickerProviderStateMixin {
   /// **内容不足一屏**时无法通过滚动触发 loadMore，改由右下角浮动按钮的
   /// 下箭头手动搜索下一页。
   ///
-  /// **⑥ 自适应高度**：不用固定 `mainAxisExtent`，改为按行 `IntrinsicHeight`
-  /// 取本行最高卡片的高度——不同插件卡片高度不同也不会裁剪/留白。
-  Widget _buildResultsGrid(String pluginName, SearchState state) {
-    final crossCount = _crossCount();
+  /// **纵向列表（一卡一行）**：宽度铺满窗口、高度由卡片自身内容（插件描述符）
+  /// 决定 —— Dart 侧不再按列数切格子，也不用固定行高 / `IntrinsicHeight`
+  /// 把同排卡片拉齐，插件想画多高就多高。
+  Widget _buildResultsList(String pluginName, SearchState state) {
     final cards = state.results;
     final controller = _scrollControllerFor(pluginName);
 
@@ -414,12 +415,9 @@ class _SearchPageState extends State<SearchPage> with TickerProviderStateMixin {
           slivers: [
             SliverPadding(
               padding: const EdgeInsets.all(8),
-              sliver: SliverList(
-                delegate: SliverChildBuilderDelegate(
-                  (context, index) => _buildCardRow(
-                      _chunkCards(cards, index * crossCount), crossCount),
-                  childCount: (cards.length / crossCount).ceil(),
-                ),
+              sliver: SliverList.builder(
+                itemCount: cards.length,
+                itemBuilder: (context, index) => _buildResultItem(cards[index]),
               ),
             ),
             SliverToBoxAdapter(
@@ -431,48 +429,26 @@ class _SearchPageState extends State<SearchPage> with TickerProviderStateMixin {
     );
   }
 
-  /// 结果列数：宽屏 3 列 / 平板 2 列 / 手机 1 列。
-  int _crossCount() {
-    final screenWidth = MediaQuery.sizeOf(context).width;
-    if (screenWidth > 900) return 3;
-    if (screenWidth > 600) return 2;
-    return 1;
+  /// 单个结果卡片：强制撑满可用宽度（与详情页 `crossAxisAlignment.stretch`
+  /// 同语义），高度交给卡片内容自己决定。
+  ///
+  /// 描述符渲染出的卡片可能自带 `Row(mainAxisSize: min)` / 居中等「按内容
+  /// 收缩」的布局，不套这一层的话宽度会跟着内容走，而不是跟着窗口走。
+  Widget _buildResultItem(Widget card) {
+    return SizedBox(width: double.infinity, child: card);
   }
 
-  /// 从 [list] 的 [start] 起取至多 [crossCount] 个元素（最后一行可能不满）。
-  List<Widget> _chunkCards(List<Widget> list, int start) {
-    final end = (start + _crossCount()).clamp(0, list.length);
-    return list.sublist(start, end);
-  }
-
-  /// 自适应行：`IntrinsicHeight` 取本行最高卡片的高度，行内所有卡片撑满该高度
-  /// （比固定 `mainAxisExtent` 更稳——不同插件卡片高度不同也不会裁剪/留白）。
-  Widget _buildCardRow(List<Widget> cards, int crossCount) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: IntrinsicHeight(
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            for (var i = 0; i < crossCount; i++)
-              Expanded(
-                child: Padding(
-                  padding: EdgeInsets.only(
-                      left: i == 0 ? 0 : 4, right: i == crossCount - 1 ? 0 : 4),
-                  child: i < cards.length ? cards[i] : const SizedBox.shrink(),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
+  /// 聚合区块折叠时展示的结果条数。
+  ///
+  /// 网格时代「折叠 = 只展示一行」（行数随窗口宽度 1~3 张不等）；改成纵向
+  /// 列表后一行没有意义，固定展示前 3 条，其余点「查看全部」。
+  static const int _collapsedPreviewCount = 3;
 
   // ============ ⑤ 聚合 tab（全部） ============
 
   /// 聚合视图：顶部是可收起的「搜索插件」选择面板（默认全选，随内容滚动，
   /// 滚到顶部即可调整参与搜索的插件），下方按源分组展示各源结果；
-  /// 每个区块默认折叠（只展示一行结果）。
+  /// 每个区块默认折叠（只展示前 [_collapsedPreviewCount] 条）。
   Widget _buildAllTab() {
     final selectedNames = _aggregateNames();
     final selected =
@@ -566,7 +542,8 @@ class _SearchPageState extends State<SearchPage> with TickerProviderStateMixin {
               padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
               child: Row(
                 children: [
-                  Icon(Icons.tune, size: 16,
+                  Icon(Icons.tune,
+                      size: 16,
                       color: Theme.of(context).colorScheme.onSurfaceVariant),
                   const SizedBox(width: 6),
                   Text(
@@ -611,7 +588,8 @@ class _SearchPageState extends State<SearchPage> with TickerProviderStateMixin {
                 children: [
                   for (final p in visible)
                     FilterChip(
-                      label: Text(p.name, style: const TextStyle(fontSize: 13)),
+                      label: Text(_pluginController.displayNameOf(p.name),
+                          style: const TextStyle(fontSize: 13)),
                       selected: selectedNames.contains(p.name),
                       showCheckmark: false,
                       visualDensity: VisualDensity.compact,
@@ -672,7 +650,7 @@ class _SearchPageState extends State<SearchPage> with TickerProviderStateMixin {
   }
 
   /// 单个来源的聚合区块：头（可点展开/收起）+ 该源结果。
-  /// **默认折叠**：只展示一行结果；展开才显示全部已加载结果。
+  /// **默认折叠**：只展示前 [_collapsedPreviewCount] 条；展开才显示全部已加载结果。
   Widget _buildAllSection(Plugin p) {
     final name = p.name;
     return Observer(builder: (_) {
@@ -694,10 +672,14 @@ class _SearchPageState extends State<SearchPage> with TickerProviderStateMixin {
               padding: const EdgeInsets.fromLTRB(12, 6, 4, 4),
               child: Row(
                 children: [
-                  Icon(p.type.icon, size: 16, color: p.type.color),
+                  Icon(
+                    _pluginController.categoryOf(p).icon,
+                    size: 16,
+                    color: _pluginController.categoryOf(p).color,
+                  ),
                   const SizedBox(width: 6),
                   Text(
-                    p.name,
+                    _pluginController.displayNameOf(p.name),
                     style: const TextStyle(fontWeight: FontWeight.w600),
                   ),
                   const SizedBox(width: 6),
@@ -774,24 +756,20 @@ class _SearchPageState extends State<SearchPage> with TickerProviderStateMixin {
                       color: Theme.of(context).colorScheme.onSurfaceVariant)),
             )
           else if (expanded)
-            _buildSectionGrid(rs)
+            _buildSectionList(rs)
           else
-            // 折叠：只展示一行结果
-            _buildSectionGrid(rs.take(_crossCount()).toList()),
+            // 折叠：只展示前 [_collapsedPreviewCount] 条
+            _buildSectionList(rs.take(_collapsedPreviewCount).toList()),
         ],
       );
     });
   }
 
-  /// 聚合区块里的非滚动网格（shrinkWrap，不嵌套滚动）。
-  Widget _buildSectionGrid(List<Widget> cards) {
-    final crossCount = _crossCount();
-    final rowCount = (cards.length / crossCount).ceil();
+  /// 聚合区块里的结果列表（非滚动，一卡一行；与单源 tab 同版式）。
+  Widget _buildSectionList(List<Widget> cards) {
     return Column(
-      children: [
-        for (var r = 0; r < rowCount; r++)
-          _buildCardRow(_chunkCards(cards, r * crossCount), crossCount),
-      ],
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: cards,
     );
   }
 
@@ -829,22 +807,26 @@ class _SearchPageState extends State<SearchPage> with TickerProviderStateMixin {
             ),
           )
         else
-          Tab(
-            height: 40,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  pluginByName[k]?.type.icon,
-                  size: 16,
-                  color: pluginByName[k]?.type.color,
-                ),
-                const SizedBox(width: 4),
-                Text(k),
-              ],
-            ),
-          ),
+          _buildPluginTab(k, pluginByName[k]),
     ];
+  }
+
+  /// 单个插件 tab：分类图标 + 展示名
+  Widget _buildPluginTab(String name, Plugin? plugin) {
+    final category = plugin == null
+        ? PluginCategory.unknown
+        : _pluginController.categoryOf(plugin);
+    return Tab(
+      height: 40,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(category.icon, size: 16, color: category.color),
+          const SizedBox(width: 4),
+          Text(_pluginController.displayNameOf(name)),
+        ],
+      ),
+    );
   }
 
   // ============ ④ 搜索历史面板（WywDialog 弹层，顶部对齐） ============
@@ -1061,8 +1043,8 @@ class _SearchPageState extends State<SearchPage> with TickerProviderStateMixin {
             '全部',
             Icons.all_inclusive,
           ),
-          for (final t in PluginType.values)
-            _buildCategoryDialogOption(dialogContext, t, t.label, t.icon),
+          for (final c in _pluginController.categories.all)
+            _buildCategoryDialogOption(dialogContext, c, c.label, c.icon),
         ],
       ),
     );
@@ -1070,22 +1052,22 @@ class _SearchPageState extends State<SearchPage> with TickerProviderStateMixin {
 
   Widget _buildCategoryDialogOption(
     BuildContext dialogContext,
-    PluginType? type,
+    PluginCategory? category,
     String label,
     IconData icon,
   ) {
-    final selected = _selectedCategory == type;
+    final selected = _selectedCategory == category;
     return SimpleDialogOption(
       onPressed: () {
         Navigator.of(dialogContext).pop();
-        _selectCategory(type);
+        _selectCategory(category);
       },
       child: Row(
         children: [
           Icon(
             icon,
             size: 20,
-            color: type?.color,
+            color: category?.color,
           ),
           const SizedBox(width: 12),
           Expanded(

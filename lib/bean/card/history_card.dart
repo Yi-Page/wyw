@@ -15,11 +15,19 @@ class ProgressHistoryCardV extends StatefulWidget {
     required this.historyItem,
     this.showDelete = false,
     this.onDeleted,
+    this.borderRadius,
+    this.margin,
   });
 
   final HistoryEntry historyItem;
   final bool showDelete;
   final VoidCallback? onDeleted;
+
+  /// 透传给外壳的分组圆角（单列分组列表按行位置传入）。
+  final BorderRadius? borderRadius;
+
+  /// 透传给外壳的外边距（分组列表用它压紧行间距）。
+  final EdgeInsets? margin;
 
   @override
   State<ProgressHistoryCardV> createState() => _ProgressHistoryCardVState();
@@ -102,6 +110,15 @@ class _ProgressHistoryCardVState extends State<ProgressHistoryCardV> {
         if (ep == null) return null;
         if (ep.durationMs <= 0) return null;
         final ratio = (ep.positionMs / ep.durationMs).clamp(0.0, 1.0);
+        // 哪个源 · 哪一集（源内集名，缺省回退「第 N 集」）· 播放位置
+        final src =
+            progress.sources[progress.lastSourceIndex.clamp(0, progress.sources.length - 1)];
+        final label = [
+          if (src.name.isNotEmpty) src.name,
+          ep.name.isNotEmpty ? ep.name : '第 ${progress.lastEpisodeIndex + 1} 集',
+          '播放到 ${_formatDuration(ep.positionMs)} / '
+              '${_formatDuration(ep.durationMs)}',
+        ].join(' · ');
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -110,14 +127,15 @@ class _ProgressHistoryCardVState extends State<ProgressHistoryCardV> {
                 Icon(Icons.play_circle_outline,
                     size: 14, color: colorScheme.primary),
                 const SizedBox(width: 4),
-                Text(
-                  '播放到 ${_formatDuration(ep.positionMs)} / '
-                  '${_formatDuration(ep.durationMs)}',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: colorScheme.primary,
+                Expanded(
+                  child: Text(
+                    label,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: colorScheme.primary,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                 ),
               ],
             ),
@@ -187,6 +205,8 @@ class _ProgressHistoryCardVState extends State<ProgressHistoryCardV> {
       dismissKey: ValueKey(widget.historyItem.key),
       onTap: _onTap,
       onDeleted: widget.onDeleted,
+      borderRadius: widget.borderRadius,
+      margin: widget.margin,
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Row(

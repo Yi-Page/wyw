@@ -317,8 +317,11 @@ class M3u8Parser {
           ));
         }
 
-        // 后续 segment 的 group 需要额外偏移，避免碰撞
-        groupOffset += maxNestedGroup;
+        // 后续 segment 的 group 需要额外偏移，避免碰撞。
+        // 嵌套内容占用的是 [0, maxNestedGroup] 闭区间，所以偏移要 +1：
+        // 只加 maxNestedGroup 时，紧随其后的分片会与嵌套内容的最后一组同号，
+        // 过滤时被当成同一组，导致误删/漏删。
+        groupOffset += maxNestedGroup + 1;
       } catch (e) {
         // 获取/解析失败，保留原始 segment
         result.add(M3u8Segment(

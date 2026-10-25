@@ -1,31 +1,23 @@
 import 'dart:async';
-import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:wyw/bean/styles/media_chrome_colors.dart';
 import 'package:flutter_mobx/flutter_mobx.dart';
 import 'package:flutter_modular/flutter_modular.dart';
+import 'package:wyw/bean/widget/kazumi_menu.dart';
 import 'package:wyw/bean/widget/play_pause_icon.dart';
 import 'package:wyw/pages/player/player_adjustment_hud.dart';
-import 'package:wyw/pages/player/controller/player_aspect_ratio.dart';
-import 'package:wyw/pages/player/controller/player_super_resolution.dart';
+import 'package:wyw/pages/player/danmaku_panel_button.dart';
+import 'package:wyw/pages/player/player_transport_bar.dart';
+import 'package:wyw/pages/player/player_screenshot_controls.dart';
 import 'package:wyw/bean/widget/embedded_native_control_area.dart';
 import 'package:wyw/pages/player/player_panel_hold.dart';
-import 'package:wyw/services/player/pip_utils.dart';
-import 'package:wyw/modules/download/download_module.dart';
-import 'package:wyw/pages/download/download_controller.dart';
 import 'package:wyw/pages/video/video_controller.dart';
-import 'package:wyw/services/history/history_progress_reporter.dart';
-import 'package:wyw/services/storage/history_type.dart';
-import 'package:wyw/bean/dialog/dialog_helper.dart';
 import 'package:wyw/pages/player/player_controller.dart';
 import 'package:wyw/pages/player/skip_seconds_dialog.dart';
-import 'package:wyw/services/player/remote.dart';
-import 'package:wyw/utils/constants.dart';
+import 'package:wyw/services/platform/screen_orientation.dart';
 import 'package:wyw/services/storage/storage.dart';
-import 'package:wyw/services/logging/logger.dart';
-import 'package:wyw/services/logging/log_tags.dart';
 import 'package:audio_video_progress_bar/audio_video_progress_bar.dart';
-import 'package:wyw/services/player/timed_shutdown_service.dart';
 import 'package:wyw/utils/device.dart';
 import 'package:wyw/utils/format.dart';
 
@@ -41,14 +33,14 @@ class PlayerItemPanel extends StatefulWidget {
     required this.handleScreenShot,
     required this.handleProgressBarDragStart,
     required this.handleProgressBarSeek,
-    required this.handleSuperResolutionChange,
     required this.panelVisibilityController,
     required this.acquirePlayerPanelHold,
     required this.skipOP,
-    required this.showVideoInfo,
     required this.pauseForTimedShutdown,
     this.disableAnimations = false,
-    this.toggleEpisodePanel,
+    this.splitPanelVisible = false,
+    this.toggleSplitPanel,
+    required this.showScreenshotCandidates,
   });
 
   final PlayerController playerController;
@@ -56,19 +48,20 @@ class PlayerItemPanel extends StatefulWidget {
   final Future<void> Function(double) setPlaybackSpeed;
   final void Function() handleFullscreen;
   final void Function() handleScreenShot;
+  final VoidCallback showScreenshotCandidates;
   final VoidCallback handleProgressBarDragStart;
   final Future<void> Function(Duration duration) handleProgressBarSeek;
-  final Future<void> Function(SuperResolutionMode mode)
-      handleSuperResolutionChange;
   final AnimationController panelVisibilityController;
   final PlayerPanelHold Function() acquirePlayerPanelHold;
   final void Function() skipOP;
-  final void Function() showVideoInfo;
   final VoidCallback pauseForTimedShutdown;
   final bool disableAnimations;
 
-  /// 选集/线路面板切换回调（由视频页传入）。
-  final VoidCallback? toggleEpisodePanel;
+  /// 分屏面板当前是否展开（决定 ⚙ 的选中态）。
+  final bool splitPanelVisible;
+
+  /// 开合分屏面板。
+  final VoidCallback? toggleSplitPanel;
 
   @override
   State<PlayerItemPanel> createState() => _PlayerItemPanelState();
@@ -104,264 +97,13 @@ class _PlayerItemPanelState extends State<PlayerItemPanel> {
     _danmakuTextFieldHold = null;
   }
 
-  /// 在下载记录中查找当前视频 URL 对应的下载任务
-  _DownloadContext? _findCurrentDownload() {
-    final downloadController = inject<DownloadController>();
-    final episode = downloadController.findEpisodeByIdentity(
-      sourceKey: videoPageController.sourceKey,
-      videoId: videoPageController.videoId,
-      sourceIndex: videoPageController.currentSourceIndex,
-      episodeIndex: videoPageController.currentEpisodeIndex,
-    );
-    if (episode == null) return null;
-    final plugin = videoPageController.sourceKey.isEmpty
-        ? 'wyw'
-        : videoPageController.sourceKey;
-    final record = downloadController.getRecord(
-        videoPageController.videoId.hashCode, plugin);
-    if (record == null) return null;
-    return _DownloadContext(
-      record: record,
-      episode: episode,
-      downloadController: downloadController,
-    );
-  }
-
-  /// 下载按钮：根据当前下载状态显示不同 UI
-  Widget _buildDownloadButton() {
-    return Observer(builder: (context) {
-      final ctx = _findCurrentDownload();
-      if (ctx == null) {
-        return _buildIdleDownloadButton();
-      }
-      switch (ctx.episode.status) {
-        case DownloadStatus.resolving:
-          return _buildDownloadStatusIcon(
-            tooltip: '正在解析视频源…',
-            child: const SizedBox(
-              width: 20,
-              height: 20,
-              child: CircularProgressIndicator(
-                  strokeWidth: 2, color: MediaChromeColors.foregroundDim),
-            ),
-          );
-        case DownloadStatus.downloading:
-          return _buildDownloadingProgress(ctx);
-        case DownloadStatus.completed:
-          return _buildDownloadStatusIcon(
-            tooltip: '已下载完成',
-            child: Icon(Icons.check_circle,
-                color: Theme.of(context).colorScheme.primary, size: 20),
-          );
-        case DownloadStatus.failed:
-          return _buildDownloadStatusIcon(
-            tooltip: '下载失败：${ctx.episode.errorMessage}',
-            onTap: () {
-              final dc = ctx.downloadController;
-              dc.retryDownload(
-                mediaId: ctx.record.mediaId,
-                pluginName: ctx.record.pluginName,
-                episodeNumber: ctx.episode.episodeNumber,
-              );
-              WywDialog.showToast(message: '正在重试下载');
-            },
-            child: Icon(Icons.error_outline,
-                color: Theme.of(context).colorScheme.error, size: 20),
-          );
-        case DownloadStatus.paused:
-          return _buildDownloadStatusIcon(
-            tooltip:
-                '已暂停 · ${(ctx.episode.progressPercent * 100).toStringAsFixed(0)}%',
-            onTap: () {
-              final dc = ctx.downloadController;
-              dc.retryDownload(
-                mediaId: ctx.record.mediaId,
-                pluginName: ctx.record.pluginName,
-                episodeNumber: ctx.episode.episodeNumber,
-              );
-              WywDialog.showToast(message: '正在恢复下载');
-            },
-            child: const Icon(Icons.pause_circle_outline,
-                color: MediaChromeColors.foregroundDim, size: 20),
-          );
-        case DownloadStatus.pending:
-          return _buildDownloadStatusIcon(
-            tooltip: '排队中…',
-            child: const Icon(Icons.schedule, color: MediaChromeColors.foregroundFaint, size: 20),
-          );
-        default:
-          return _buildIdleDownloadButton();
-      }
-    });
-  }
-
-  Widget _buildIdleDownloadButton() {
-    return IconButton(
-      tooltip: '下载视频',
-      onPressed: () async {
-        if (videoPageController.isPip) {
-          WywDialog.showToast(message: '画中画状态下暂不支持下载');
-          return;
-        }
-        var cover = videoPageController.videoCover;
-        if (cover.isEmpty) {
-          try {
-            // v3：优先用结构化 id（$sourceKey:$videoId）查；旧 v2 以媒体直链为
-            // key，需同时尝试入口 URL 与已解析直链，否则网页入口封面查不到。
-            final structuredId = (videoPageController.videoId.isNotEmpty)
-                ? ((videoPageController.sourceKey.isEmpty)
-                    ? videoPageController.videoId
-                    : '${videoPageController.sourceKey}:${videoPageController.videoId}')
-                : '';
-            final entry = (structuredId.isNotEmpty
-                    ? HistoryProgressReporter().findEntry(
-                        type: HistoryType.video,
-                        sourceId: structuredId,
-                      )
-                    : null) ??
-                HistoryProgressReporter().findEntry(
-                  type: HistoryType.video,
-                  sourceId: videoPageController.videoUrl,
-                ) ??
-                (videoPageController.resolvedVideoUrl.isNotEmpty
-                    ? HistoryProgressReporter().findEntry(
-                        type: HistoryType.video,
-                        sourceId: videoPageController.resolvedVideoUrl,
-                      )
-                    : null);
-            cover = entry?.cover ?? '';
-          } catch (e) {
-            WywLogger().d('${LogTag.player} 查询播放历史封面失败（已忽略）', error: e);
-          }
-        }
-        // 先创建下载任务（resolve 形态的集会先经插件解析取地址）。
-        // 显式点「下载」即允许合流：解析完成后切换到本地代理播放（播放即下载）。
-        await videoPageController.downloadEpisode(
-          videoPageController.currentSourceIndex,
-          videoPageController.currentEpisodeIndex,
-        );
-        final switched = await videoPageController.startProxyForCurrentPlayback(
-          playerController: playerController,
-        );
-        if (switched) {
-          WywDialog.showToast(message: '已开始播放即下载，进度可在播放器上方查看');
-        } else {
-          WywDialog.showToast(message: '已添加到下载队列，可在 我的 -> 离线下载 中查看');
-        }
-      },
-      icon: const Icon(Icons.download_outlined, color: MediaChromeColors.foreground),
-    );
-  }
-
-  /// 进度指示器
-  Widget _buildDownloadingProgress(_DownloadContext ctx) {
-    final pct = (ctx.episode.progressPercent * 100).toStringAsFixed(0);
-    return Tooltip(
-      message: '下载中 · $pct%',
-      child: SizedBox(
-        width: 28,
-        height: 28,
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            SizedBox(
-              width: 24,
-              height: 24,
-              child: CircularProgressIndicator(
-                value: ctx.episode.progressPercent,
-                strokeWidth: 2.5,
-                color: MediaChromeColors.foreground,
-              ),
-            ),
-            Text(
-              pct,
-              style: const TextStyle(
-                color: MediaChromeColors.foreground,
-                fontSize: 7,
-                fontWeight: FontWeight.w700,
-                fontFeatures: [FontFeature.tabularFigures()],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// 通用状态图标包装
-  Widget _buildDownloadStatusIcon({
-    required String tooltip,
-    required Widget child,
-    VoidCallback? onTap,
-  }) {
-    final button = Padding(
-      padding: const EdgeInsets.all(12),
-      child: child,
-    );
-    if (onTap != null) {
-      return Tooltip(
-        message: tooltip,
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(20),
-          child: button,
-        ),
-      );
-    }
-    return Tooltip(message: tooltip, child: button);
-  }
-
-  // 选择倍速
-  void showSetSpeedSheet() {
-    final double currentSpeed = playerController.playback.playerSpeed;
-    WywDialog.show(builder: (context) {
-      return AlertDialog(
-        title: const Text('播放速度'),
-        content: StatefulBuilder(
-            builder: (BuildContext context, StateSetter setState) {
-          return Wrap(
-            spacing: 8,
-            runSpacing: isDesktop() ? 8 : 0,
-            children: [
-              for (final double i in defaultPlaySpeedList) ...<Widget>[
-                if (i == currentSpeed)
-                  FilledButton(
-                    onPressed: () async {
-                      await widget.setPlaybackSpeed(i);
-                      WywDialog.dismiss();
-                    },
-                    child: Text(i.toString()),
-                  )
-                else
-                  FilledButton.tonal(
-                    onPressed: () async {
-                      await widget.setPlaybackSpeed(i);
-                      WywDialog.dismiss();
-                    },
-                    child: Text(i.toString()),
-                  ),
-              ]
-            ],
-          );
-        }),
-        actions: <Widget>[
-          TextButton(
-            onPressed: () => WywDialog.dismiss(),
-            child: Text(
-              '取消',
-              style: TextStyle(color: Theme.of(context).colorScheme.outline),
-            ),
-          ),
-          TextButton(
-            onPressed: () async {
-              await widget.setPlaybackSpeed(1.0);
-              WywDialog.dismiss();
-            },
-            child: const Text('默认速度'),
-          ),
-        ],
-      );
-    });
+  /// 弹幕开关按钮（顶栏常驻，宽窄屏都渲染）。
+  ///
+  /// 未匹配时点击 / 已匹配时长按都打开分屏面板的「弹幕」tab（选择动线在那里）；
+  /// 其余情况单击开关弹幕。它与面板「弹幕设置」tab 的总开关读同一个
+  /// `danmaku.danmakuOn`，天然双向同步。
+  Widget _buildDanmakuButton() {
+    return DanmakuPanelButton(playerController: playerController);
   }
 
   void showForwardChange() {
@@ -420,6 +162,17 @@ class _PlayerItemPanelState extends State<PlayerItemPanel> {
 
   @override
   Widget build(BuildContext context) {
+    // 面板布局只由「可用宽度」决定，不看横竖屏：分屏、桌面小窗、PiP 也是窄的，
+    // 按宽度一次覆盖；用 textScaler 换算保证无障碍大字号下阈值同步放大。
+    return LayoutBuilder(
+      builder: (context, constraints) => _buildPanel(
+        constraints.maxWidth < MediaQuery.textScalerOf(context).scale(600),
+      ),
+    );
+  }
+
+  /// [compact] 为真即「窄屏」（手机竖屏、分屏、小窗、PiP），此时顶/底栏都走精简布局。
+  Widget _buildPanel(bool compact) {
     return Stack(
       alignment: Alignment.center,
       children: [
@@ -511,47 +264,57 @@ class _PlayerItemPanelState extends State<PlayerItemPanel> {
             );
           }),
         ),
+        // 三个 HUD 只在交互瞬间出现且内容持续在变，整块从语义树摘掉
+        // （seek 拖拽、倍速、音量亮度调整对读屏没有逐帧朗读的意义）。
         Positioned(
           top: 25,
-          child: Observer(builder: (context) {
-            return PlayerSeekHud(
-              visible: playerController.panel.showSeekTime,
-              currentPosition: playerController.playback.currentPosition,
-              playerPosition: playerController.playback.playerPosition,
-              duration: playerController.playback.duration,
-              direction: playerController.panel.seekDirection,
-              disableAnimations: widget.disableAnimations,
-            );
-          }),
+          child: ExcludeSemantics(
+            child: Observer(builder: (context) {
+              return PlayerSeekHud(
+                visible: playerController.panel.showSeekTime,
+                currentPosition: playerController.playback.currentPosition,
+                playerPosition: playerController.playback.playerPosition,
+                duration: playerController.playback.duration,
+                direction: playerController.panel.seekDirection,
+                disableAnimations: widget.disableAnimations,
+              );
+            }),
+          ),
         ),
         Positioned(
           top: 25,
-          child: Observer(builder: (context) {
-            return PlayerSpeedHud(
-              visible: playerController.panel.showPlaySpeed,
-              speed: playerController.playback.playerSpeed,
-              disableAnimations: widget.disableAnimations,
-            );
-          }),
+          child: ExcludeSemantics(
+            child: Observer(builder: (context) {
+              return PlayerSpeedHud(
+                visible: playerController.panel.showPlaySpeed,
+                speed: playerController.playback.playerSpeed,
+                disableAnimations: widget.disableAnimations,
+              );
+            }),
+          ),
         ),
         Positioned(
           top: 25,
-          child: Observer(builder: (context) {
-            final showVolume = playerController.panel.showVolume;
-            final showBrightness = playerController.panel.showBrightness;
-            return PlayerAdjustmentHud(
-              visible: showVolume || showBrightness,
-              type: showVolume
-                  ? PlayerAdjustmentHudType.volume
-                  : PlayerAdjustmentHudType.brightness,
-              value: showVolume
-                  ? playerController.playback.volume
-                  : playerController.panel.brightness,
-              disableAnimations: widget.disableAnimations,
-            );
-          }),
+          child: ExcludeSemantics(
+            child: Observer(builder: (context) {
+              final showVolume = playerController.panel.showVolume;
+              final showBrightness = playerController.panel.showBrightness;
+              return PlayerAdjustmentHud(
+                visible: showVolume || showBrightness,
+                type: showVolume
+                    ? PlayerAdjustmentHudType.volume
+                    : PlayerAdjustmentHudType.brightness,
+                value: showVolume
+                    ? playerController.playback.volume
+                    : playerController.panel.brightness,
+                disableAnimations: widget.disableAnimations,
+              );
+            }),
+          ),
         ),
-        (isDesktop() || !videoPageController.isFullscreen)
+        // 右侧竖排（截图 / 面板锁定）只在「非桌面 + 全屏 + 非窄屏」出现：
+        // 窄屏上这两个图标会挤在画面右缘，Kazumi 也是这么砍的。
+        (compact || isDesktop() || !videoPageController.isFullscreen)
             ? Container()
             : Positioned(
                 right: 0,
@@ -563,10 +326,10 @@ class _PlayerItemPanelState extends State<PlayerItemPanel> {
                         ? playerController.panel.showVideoController
                         : true,
                     child: widget.disableAnimations
-                        ? leftControlWidget
+                        ? _leftControlWidget()
                         : SlideTransition(
                             position: leftOffsetAnimation,
-                            child: leftControlWidget),
+                            child: _leftControlWidget()),
                   );
                 }),
               ),
@@ -581,9 +344,10 @@ class _PlayerItemPanelState extends State<PlayerItemPanel> {
                       ? playerController.panel.showVideoController
                       : true),
               child: widget.disableAnimations
-                  ? topControlWidget
+                  ? _topControlWidget(compact)
                   : SlideTransition(
-                      position: topOffsetAnimation, child: topControlWidget),
+                      position: topOffsetAnimation,
+                      child: _topControlWidget(compact)),
             );
           }),
         ),
@@ -598,10 +362,10 @@ class _PlayerItemPanelState extends State<PlayerItemPanel> {
                       ? playerController.panel.showVideoController
                       : true),
               child: widget.disableAnimations
-                  ? bottomControlWidget
+                  ? _bottomControlWidget(compact)
                   : SlideTransition(
                       position: bottomOffsetAnimation,
-                      child: bottomControlWidget),
+                      child: _bottomControlWidget(compact)),
             );
           }),
         ),
@@ -609,7 +373,15 @@ class _PlayerItemPanelState extends State<PlayerItemPanel> {
     );
   }
 
-  Widget get bottomControlWidget {
+  /// 底栏。
+  ///
+  /// 布局交给 [PlayerTransportBar]：窄屏单行（播放 + 进度 + 时间 + 方向锁定/全屏），
+  /// 宽屏多行并把上一集/下一集放在进度条下面一行。窄屏不放上一集/下一集
+  /// ——一行里塞 6 个控件会把进度条压得没法拖，切集走顶栏的选集面板。
+  ///
+  /// 底栏只留播放相关：原先宽屏那一簇「超分/倍速/比例」MenuAnchor 已在 P6 退场，
+  /// 分别由面板「画面」tab（超分/比例）与「播放」tab（倍速）承载。
+  Widget _bottomControlWidget(bool compact) {
     return SafeArea(
       top: false,
       bottom: videoPageController.isFullscreen,
@@ -621,291 +393,146 @@ class _PlayerItemPanelState extends State<PlayerItemPanel> {
                 !playerController.panel.showVideoController)
             ? SystemMouseCursors.none
             : SystemMouseCursors.basic,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (!isDesktop() && !isTablet())
-              Container(
-                padding: const EdgeInsets.only(left: 10.0, bottom: 10),
-                child: Text(
-                  '${durationToString(playerController.playback.currentPosition)} / ${durationToString(playerController.playback.duration)}',
-                  style: const TextStyle(
-                    color: MediaChromeColors.foreground,
-                    fontSize: 12.0,
-                    fontFeatures: [
-                      FontFeature.tabularFigures(),
-                    ],
-                  ),
-                ),
+        child: PlayerTransportBar(
+          compact: compact,
+          timePlacement: PlayerTimeLabelPlacement.forViewport(
+            MediaQuery.sizeOf(context),
+            desktop: isDesktop(),
+          ),
+          playPause: IconButton(
+            tooltip: playerController.playback.playing ? '暂停' : '播放',
+            onPressed: () => playerController.playOrPause(),
+            icon: PlayPauseIcon(
+              iconColor: MediaChromeColors.foreground,
+              playing: playerController.playback.playing,
+            ),
+          ),
+          nextEpisode: _adjacentEpisodeButtons(),
+          progressBuilder: (location) => Observer(
+            builder: (context) => ProgressBar(
+              thumbRadius: 8,
+              thumbGlowRadius: 18,
+              timeLabelLocation: location,
+              timeLabelTextStyle: const TextStyle(
+                color: MediaChromeColors.foreground,
+                fontSize: 12.0,
+                fontFeatures: [
+                  FontFeature.tabularFigures(),
+                ],
               ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              child: ProgressBar(
-                thumbRadius: 8,
-                thumbGlowRadius: 18,
-                timeLabelLocation: isTablet()
-                    ? TimeLabelLocation.sides
-                    : TimeLabelLocation.none,
-                timeLabelTextStyle: const TextStyle(
+              progress: playerController.playback.currentPosition,
+              buffered: playerController.playback.buffer,
+              total: playerController.playback.duration,
+              onSeek: widget.handleProgressBarSeek,
+              onDragStart: (_) => widget.handleProgressBarDragStart(),
+              onDragUpdate: (details) => playerController.seeking
+                  .updateInteractiveSeek(details.timeStamp),
+            ),
+          ),
+          timeLabel: ExcludeSemantics(
+            // 时间每秒都在变，从语义树摘掉：Windows 无障碍桥对持续变化的语义
+            // 节点会刷 AXTree 更新失败日志（引擎 bug，无害但刷屏），而读屏用户
+            // 也不需要逐秒朗读时间。
+            child: Observer(
+              builder: (context) => Text(
+                '${durationToString(playerController.playback.currentPosition)} / ${durationToString(playerController.playback.duration)}',
+                style: TextStyle(
                   color: MediaChromeColors.foreground,
-                  fontSize: 12.0,
-                  fontFeatures: [
+                  fontSize: !compact && isDesktop() ? 16.0 : 12.0,
+                  fontFeatures: const [
                     FontFeature.tabularFigures(),
                   ],
                 ),
-                progress: playerController.playback.currentPosition,
-                buffered: playerController.playback.buffer,
-                total: playerController.playback.duration,
-                onSeek: widget.handleProgressBarSeek,
-                onDragStart: (_) => widget.handleProgressBarDragStart(),
-                onDragUpdate: (details) => playerController.seeking
-                    .updateInteractiveSeek(details.timeStamp),
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              child: Row(
-                children: [
-                  IconButton(
-                    tooltip: playerController.playback.playing ? '暂停' : '播放',
-                    onPressed: () => playerController.playOrPause(),
-                    icon: PlayPauseIcon(
-                      iconColor: MediaChromeColors.foreground,
-                      playing: playerController.playback.playing,
-                    ),
-                  ),
-
-                  // 上一集 / 下一集（当前线路内切换，结构化进入时显示）
-                  if (videoPageController.sources.isNotEmpty) ...[
-                    IconButton(
-                      color: MediaChromeColors.foreground,
-                      tooltip: '上一集',
-                      onPressed: videoPageController.hasPreviousEpisode
-                          ? () {
-                              videoPageController.playAdjacentEpisode(
-                                -1,
-                                playerController: playerController,
-                              );
-                            }
-                          : null,
-                      icon: const Icon(Icons.skip_previous_rounded),
-                    ),
-                    IconButton(
-                      color: MediaChromeColors.foreground,
-                      tooltip: '下一集',
-                      onPressed: videoPageController.hasNextEpisode
-                          ? () {
-                              videoPageController.playAdjacentEpisode(
-                                1,
-                                playerController: playerController,
-                              );
-                            }
-                          : null,
-                      icon: const Icon(Icons.skip_next_rounded),
-                    ),
-                  ],
-
-                  if (isDesktop())
-                    Container(
-                      padding: const EdgeInsets.only(left: 10.0),
-                      child: Text(
-                        '${durationToString(playerController.playback.currentPosition)} / ${durationToString(playerController.playback.duration)}',
-                        style: const TextStyle(
-                          color: MediaChromeColors.foreground,
-                          fontSize: 16.0,
-                          fontFeatures: [
-                            FontFeature.tabularFigures(),
-                          ],
-                        ),
-                      ),
-                    ),
-                  Expanded(child: SizedBox.shrink()),
-                  // 超分辨率
-                  PlayerPanelHoldMenuAnchor(
-                    acquirePlayerPanelHold: widget.acquirePlayerPanelHold,
-                    consumeOutsideTap: true,
-                    builder: (BuildContext context, MenuController controller,
-                        Widget? child) {
-                      return TextButton(
-                        onPressed: () {
-                          if (controller.isOpen) {
-                            controller.close();
-                          } else {
-                            controller.open();
-                          }
-                        },
-                        child: const Text(
-                          '超分辨率',
-                          style: TextStyle(color: MediaChromeColors.foreground),
-                        ),
-                      );
-                    },
-                    menuChildren: [
-                      for (final mode in SuperResolutionMode.values)
-                        MenuItemButton(
-                          onPressed: () =>
-                              widget.handleSuperResolutionChange(mode),
-                          child: Container(
-                            height: 48,
-                            constraints: BoxConstraints(minWidth: 112),
-                            child: Align(
-                              alignment: Alignment.centerLeft,
-                              child: Text(
-                                mode.label,
-                                style: TextStyle(
-                                  color: playerController
-                                              .playback.superResolutionMode ==
-                                          mode
-                                      ? Theme.of(context).colorScheme.primary
-                                      : null,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                  // 倍速播放
-                  PlayerPanelHoldMenuAnchor(
-                    acquirePlayerPanelHold: widget.acquirePlayerPanelHold,
-                    consumeOutsideTap: true,
-                    builder: (BuildContext context, MenuController controller,
-                        Widget? child) {
-                      return TextButton(
-                        onPressed: () {
-                          if (controller.isOpen) {
-                            controller.close();
-                          } else {
-                            controller.open();
-                          }
-                        },
-                        child: Text(
-                          playerController.playback.playerSpeed == 1.0
-                              ? '倍速'
-                              : '${playerController.playback.playerSpeed}x',
-                          style: const TextStyle(color: MediaChromeColors.foreground),
-                        ),
-                      );
-                    },
-                    menuChildren: [
-                      for (final double i
-                          in defaultPlaySpeedList) ...<MenuItemButton>[
-                        MenuItemButton(
-                          onPressed: () async {
-                            await widget.setPlaybackSpeed(i);
-                          },
-                          child: Container(
-                            height: 48,
-                            constraints: BoxConstraints(minWidth: 112),
-                            child: Align(
-                              alignment: Alignment.centerLeft,
-                              child: Text(
-                                '${i}x',
-                                style: TextStyle(
-                                  color: i ==
-                                          playerController.playback.playerSpeed
-                                      ? Theme.of(context).colorScheme.primary
-                                      : null,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                  PlayerPanelHoldMenuAnchor(
-                    acquirePlayerPanelHold: widget.acquirePlayerPanelHold,
-                    consumeOutsideTap: true,
-                    builder: (BuildContext context, MenuController controller,
-                        Widget? child) {
-                      return IconButton(
-                        onPressed: () {
-                          if (controller.isOpen) {
-                            controller.close();
-                          } else {
-                            controller.open();
-                          }
-                        },
-                        icon: const Icon(
-                          Icons.aspect_ratio_rounded,
-                          color: MediaChromeColors.foreground,
-                        ),
-                        tooltip: '视频比例',
-                      );
-                    },
-                    menuChildren: [
-                      for (final aspectRatioMode in PlayerAspectRatio.values)
-                        MenuItemButton(
-                          onPressed: () => playerController
-                              .panel.aspectRatioMode = aspectRatioMode,
-                          child: Container(
-                            height: 48,
-                            constraints: BoxConstraints(minWidth: 112),
-                            child: Align(
-                              alignment: Alignment.centerLeft,
-                              child: Text(
-                                aspectRatioMode.label,
-                                style: TextStyle(
-                                  color: aspectRatioMode ==
-                                          playerController.panel.aspectRatioMode
-                                      ? Theme.of(context).colorScheme.primary
-                                      : null,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                  // 非桌面端恒为全屏，不提供全屏切换按钮。
-                  isDesktop()
-                      ? IconButton(
-                          color: MediaChromeColors.foreground,
-                          icon: Icon(videoPageController.isFullscreen
-                              ? Icons.fullscreen_exit_rounded
-                              : Icons.fullscreen_rounded),
-                          tooltip:
-                              videoPageController.isFullscreen ? '退出全屏' : '全屏',
-                          onPressed: () {
-                            widget.handleFullscreen();
-                          },
-                        )
-                      // 非桌面端：锁定/解锁屏幕方向
-                      : IconButton(
-                          color: MediaChromeColors.foreground,
-                          icon: Icon(
-                            videoPageController.isOrientationLocked
-                                ? Icons.screen_lock_rotation
-                                : Icons.screen_rotation,
-                          ),
-                          tooltip: videoPageController.isOrientationLocked
-                              ? '解锁屏幕方向'
-                              : '锁定屏幕方向',
-                          onPressed: () {
-                            videoPageController.toggleOrientationLock(
-                              MediaQuery.orientationOf(context),
-                            );
-                          },
-                        ),
-                ],
-              ),
-            ),
-            if (isTablet() || isDesktop()) const SizedBox(height: 6),
-          ],
+          ),
+          // 宽屏时这一槽位放「切集之后的额外控件」；超分/倍速/比例退场后
+          // 没有内容，留空（`Expanded` 仍会把全屏按钮顶到最右）。
+          controls: const SizedBox.shrink(),
+          fullscreen: _orientationOrFullscreenButton(),
         ),
       ),
     );
   }
 
-  Widget get topControlWidget {
+  /// 上一集 / 下一集（当前线路内切换，结构化进入时才有）。
+  ///
+  /// transport bar 只给一个 `nextEpisode` 槽位，这里把两个按钮打包成一个 widget；
+  /// 窄屏分支不会渲染它，所以窄屏不需要为它腾空间。
+  Widget _adjacentEpisodeButtons() {
+    if (videoPageController.sources.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          color: MediaChromeColors.foreground,
+          tooltip: '上一集',
+          onPressed: videoPageController.hasPreviousEpisode
+              ? () {
+                  videoPageController.playAdjacentEpisode(
+                    -1,
+                    playerController: playerController,
+                  );
+                }
+              : null,
+          icon: const Icon(Icons.skip_previous_rounded),
+        ),
+        IconButton(
+          color: MediaChromeColors.foreground,
+          tooltip: '下一集',
+          onPressed: videoPageController.hasNextEpisode
+              ? () {
+                  videoPageController.playAdjacentEpisode(
+                    1,
+                    playerController: playerController,
+                  );
+                }
+              : null,
+          icon: const Icon(Icons.skip_next_rounded),
+        ),
+      ],
+    );
+  }
+
+  /// 桌面端提供全屏切换；非桌面端提供屏幕方向（三档策略 + 横屏切对侧）。
+  Widget _orientationOrFullscreenButton() {
+    if (!isDesktop()) {
+      return _OrientationPolicyButton(
+        acquirePlayerPanelHold: widget.acquirePlayerPanelHold,
+      );
+    }
+    return IconButton(
+      color: MediaChromeColors.foreground,
+      icon: Icon(videoPageController.isFullscreen
+          ? Icons.fullscreen_exit_rounded
+          : Icons.fullscreen_rounded),
+      tooltip: videoPageController.isFullscreen ? '退出全屏' : '全屏',
+      onPressed: () {
+        widget.handleFullscreen();
+      },
+    );
+  }
+
+  /// 顶栏。
+  ///
+  /// 控件分配规则（P5/P6 收编后）：
+  ///   - **窄屏**：返回 / 拖动区 / 跳过 / 弹幕开关 / 选集 / ⚙ 面板；
+  ///   - **宽屏**：返回 / 标题 / 跳过 / 截图 / 弹幕开关 / 选集 / ⚙ 面板；
+  ///   - 其余低频项（超分/倍速/比例/定时关闭/投屏/外部播放/下载/重新解析/
+  ///     弹幕设置/画面调节/视频详情）一律由分屏面板的 tab 承载——顶栏不再加东西，
+  ///     「更多」菜单与顶栏下载按钮已在 P6 退场（全仓不再有第二份入口）。
+  ///
+  /// 窄屏中间用空白拖动区而不是标题：一行放不下标题，留个拖动窗口更有用。
+  Widget _topControlWidget(bool compact) {
     return EmbeddedNativeControlArea(
-      requireOffset: !videoPageController.isFullscreen,
+      requireOffset: compact || !videoPageController.isFullscreen,
       child: SafeArea(
         top: false,
         bottom: false,
-        left: videoPageController.isFullscreen,
-        right: videoPageController.isFullscreen,
+        left: !compact && videoPageController.isFullscreen,
+        right: !compact && videoPageController.isFullscreen,
         child: PlayerPanelHoldMouseRegion(
           acquirePlayerPanelHold: widget.acquirePlayerPanelHold,
           cursor: (videoPageController.isFullscreen &&
@@ -924,226 +551,48 @@ class _PlayerItemPanelState extends State<PlayerItemPanel> {
               ),
               Expanded(
                 child: dtb.DragToMoveArea(
-                  child: Text(
-                    videoPageController.videoTitle,
-                    style: TextStyle(
-                      color: MediaChromeColors.foreground,
-                      fontSize:
-                          Theme.of(context).textTheme.titleMedium!.fontSize,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
+                  child: compact
+                      ? const SizedBox(height: 40)
+                      : Text(
+                          videoPageController.videoTitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: MediaChromeColors.foreground,
+                            fontSize: Theme.of(context)
+                                .textTheme
+                                .titleMedium!
+                                .fontSize,
+                          ),
+                        ),
                 ),
               ),
               // 跳过
               forwardIcon(),
-              // 选集/线路面板（仅结构化进入时可用）
-              if (widget.toggleEpisodePanel != null &&
-                  videoPageController.sources.isNotEmpty)
-                IconButton(
-                  color: MediaChromeColors.foreground,
-                  icon: const Icon(Icons.menu_open_outlined),
-                  tooltip: '选集面板',
-                  onPressed: widget.toggleEpisodePanel,
+              // 截图（仅桌面端）：截取当前画面 + 带数量徽标的候选挑选入口
+              if (isDesktop())
+                PlayerScreenshotControls(
+                  controller: playerController.screenshots,
+                  onCapture: widget.handleScreenShot,
+                  onReview: widget.showScreenshotCandidates,
                 ),
-              // 下载当前视频（离线播放时不提供下载入口）
-              if (!videoPageController.isOfflineMode) _buildDownloadButton(),
-              if ((isDesktop() && !videoPageController.isFullscreen) ||
-                  Platform.isAndroid)
+              // 弹幕开关：两种宽度都常驻（窄屏原来靠「更多」菜单下沉，该菜单
+              // 已随面板退场；总开关与面板「弹幕」tab 读同一个 observable）。
+              _buildDanmakuButton(),
+              // 选集/线路入口已收归面板「选集」tab（顶栏不再放选集按钮，
+              // 视频页的侧栏/竖屏弹窗也一并退场）。
+              // 下载/合流入口已随顶栏下载按钮退场：面板「选集」tab 的集列表
+              // 提供逐集下载按钮与状态（P2 落地）。
+              // 分屏面板开关：收编散落功能的唯一入口（播放器顶栏只留播放相关）。
+              if (widget.toggleSplitPanel != null)
                 IconButton(
-                  onPressed: () async {
-                    final toggled = await PipUtils.togglePip(
-                      isPip: videoPageController.isPip,
-                      isPlaying: playerController.playback.playing,
-                      width: playerController.debug.playerWidth,
-                      height: playerController.debug.playerHeight,
-                    );
-                    if (isDesktop()) {
-                      videoPageController.isPip = toggled;
-                    }
-                  },
-                  tooltip: '画中画',
-                  icon: const Icon(
-                    Icons.picture_in_picture,
-                    color: MediaChromeColors.foreground,
-                  ),
+                  color: widget.splitPanelVisible
+                      ? Theme.of(context).colorScheme.primary
+                      : MediaChromeColors.foreground,
+                  icon: const Icon(Icons.tune_rounded),
+                  tooltip: widget.splitPanelVisible ? '收起面板' : '打开面板',
+                  onPressed: widget.toggleSplitPanel,
                 ),
-              PlayerPanelHoldMenuAnchor(
-                acquirePlayerPanelHold: widget.acquirePlayerPanelHold,
-                consumeOutsideTap: true,
-                builder: (BuildContext context, MenuController controller,
-                    Widget? child) {
-                  return IconButton(
-                    onPressed: () {
-                      if (controller.isOpen) {
-                        controller.close();
-                      } else {
-                        controller.open();
-                      }
-                    },
-                    tooltip: '更多选项',
-                    icon: const Icon(
-                      Icons.more_vert,
-                      color: MediaChromeColors.foreground,
-                    ),
-                  );
-                },
-                menuChildren: [
-                  MenuItemButton(
-                    onPressed: () {
-                      widget.showVideoInfo();
-                    },
-                    child: Container(
-                      height: 48,
-                      constraints: BoxConstraints(minWidth: 112),
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text('视频详情'),
-                      ),
-                    ),
-                  ),
-                  MenuItemButton(
-                    onPressed: () {
-                      bool needRestart = playerController.playback.playing;
-                      playerController.pause();
-                      RemotePlay()
-                          .castVideo(playerController.videoUrl)
-                          .whenComplete(() {
-                        if (mounted && needRestart) {
-                          playerController.play();
-                        }
-                      });
-                    },
-                    child: Container(
-                      height: 48,
-                      constraints: BoxConstraints(minWidth: 112),
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text('远程投屏'),
-                      ),
-                    ),
-                  ),
-                  MenuItemButton(
-                    onPressed: () {
-                      playerController.launchExternalPlayer();
-                    },
-                    child: Container(
-                      height: 48,
-                      constraints: BoxConstraints(minWidth: 112),
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text('外部播放'),
-                      ),
-                    ),
-                  ),
-                  MenuItemButton(
-                    onPressed: () async {
-                      // 重新解析：清缓存并强制重走解析/嗅探后播放
-                      try {
-                        await playerController.stop();
-                      } catch (_) {}
-                      await videoPageController.playEpisode(
-                        sourceIndex: videoPageController.currentSourceIndex,
-                        episodeIndex: videoPageController.currentEpisodeIndex,
-                        playerController: playerController,
-                        forceReresolve: true,
-                      );
-                    },
-                    child: Container(
-                      height: 48,
-                      constraints: BoxConstraints(minWidth: 112),
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text('重新解析'),
-                      ),
-                    ),
-                  ),
-                  // 定时关闭
-                  SubmenuButton(
-                    menuChildren: [
-                      MenuItemButton(
-                        onPressed: () {
-                          TimedShutdownService().cancel();
-                        },
-                        child: Container(
-                          height: 48,
-                          constraints: BoxConstraints(minWidth: 112),
-                          child: Align(
-                            alignment: Alignment.centerLeft,
-                            child: Text(
-                              '不开启',
-                              style: TextStyle(
-                                color: !TimedShutdownService().isActive
-                                    ? Theme.of(context).colorScheme.primary
-                                    : null,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                      for (final int minutes in [15, 30, 60])
-                        MenuItemButton(
-                          onPressed: () {
-                            TimedShutdownService().start(minutes,
-                                onExpired: widget.pauseForTimedShutdown);
-                            WywDialog.showToast(
-                                message:
-                                    '已设置 ${TimedShutdownService().formatMinutesToDisplay(minutes)} 后定时关闭');
-                          },
-                          child: Container(
-                            height: 48,
-                            constraints: BoxConstraints(minWidth: 112),
-                            child: Align(
-                              alignment: Alignment.centerLeft,
-                              child: Text(
-                                '$minutes 分钟',
-                                style: TextStyle(
-                                  color: TimedShutdownService().setMinutes ==
-                                          minutes
-                                      ? Theme.of(context).colorScheme.primary
-                                      : null,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      MenuItemButton(
-                        onPressed: () {
-                          TimedShutdownService.showCustomTimerDialog(
-                            onExpired: widget.pauseForTimedShutdown,
-                          );
-                        },
-                        child: Container(
-                          height: 48,
-                          constraints: BoxConstraints(minWidth: 112),
-                          child: Align(
-                            alignment: Alignment.centerLeft,
-                            child: Text('自定义'),
-                          ),
-                        ),
-                      ),
-                    ],
-                    child: Container(
-                      height: 48,
-                      constraints: BoxConstraints(minWidth: 112),
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: ValueListenableBuilder<int>(
-                          valueListenable:
-                              TimedShutdownService().remainingSecondsNotifier,
-                          builder: (context, remainingSeconds, child) {
-                            return Text(
-                              remainingSeconds > 0
-                                  ? '定时关闭 (${TimedShutdownService().formatRemainingTime()})'
-                                  : '定时关闭',
-                            );
-                          },
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
             ],
           ),
         ),
@@ -1151,7 +600,8 @@ class _PlayerItemPanelState extends State<PlayerItemPanel> {
     );
   }
 
-  Widget get leftControlWidget {
+  /// 画面右侧竖排：截图 + 面板锁定（只在「非桌面 + 全屏 + 非窄屏」出现）。
+  Widget _leftControlWidget() {
     return SafeArea(
       top: false,
       bottom: false,
@@ -1192,15 +642,74 @@ class _PlayerItemPanelState extends State<PlayerItemPanel> {
   }
 }
 
-/// 播放器面板内下载按钮所需的上下文：记录 + 当前剧集 + 控制器
-class _DownloadContext {
-  final DownloadRecord record;
-  final DownloadEpisode episode;
-  final DownloadController downloadController;
+/// 播放页底栏的屏幕方向按钮。
+///
+/// 状态完全取自 [ScreenOrientationService] 的**真实生效策略**（不再有页面局部
+/// bool）：图标/提示就是当前方向，菜单里三档 + 横屏左右随时可切对侧。
+/// 菜单展开期间向父级借一个面板 hold，避免控制栏在菜单还开着时自动隐藏。
+class _OrientationPolicyButton extends StatefulWidget {
+  const _OrientationPolicyButton({required this.acquirePlayerPanelHold});
 
-  _DownloadContext({
-    required this.record,
-    required this.episode,
-    required this.downloadController,
-  });
+  final PlayerPanelHold Function() acquirePlayerPanelHold;
+
+  @override
+  State<_OrientationPolicyButton> createState() =>
+      _OrientationPolicyButtonState();
+}
+
+class _OrientationPolicyButtonState extends State<_OrientationPolicyButton> {
+  final ScreenOrientationService _orientation =
+      ScreenOrientationService.instance;
+  PlayerPanelHold? _hold;
+
+  @override
+  void dispose() {
+    _releaseHold();
+    super.dispose();
+  }
+
+  void _acquireHold() {
+    if (_hold?.isReleased == false) {
+      return;
+    }
+    _hold = widget.acquirePlayerPanelHold();
+  }
+
+  void _releaseHold() {
+    _hold?.release();
+    _hold = null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: _orientation,
+      builder: (context, _) {
+        final policy = _orientation.policy;
+        final side = _orientation.landscapeSide;
+        return KazumiMenuButton(
+          onOpen: _acquireHold,
+          onClose: _releaseHold,
+          builder: (context, toggle) => IconButton(
+            color: MediaChromeColors.foreground,
+            tooltip: orientationPolicyTooltip(policy, side),
+            onPressed: toggle,
+            icon: Icon(orientationPolicyIcon(policy)),
+          ),
+          menuChildren: [
+            for (final item in orientationPolicyMenuItems(policy, side))
+              KazumiMenuItem(
+                label: item.label,
+                leadingIcon: Icon(item.icon),
+                selected: item.selected,
+                requestFocusOnHover: false,
+                onPressed: () => unawaited(
+                  _orientation.updateActivePolicy(item.policy, side: item.side),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
 }

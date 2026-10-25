@@ -58,10 +58,8 @@ class HistoryProgressReporter {
   String? _videoTitle;
   String? _videoCover;
 
-  /// 5 秒内最多写盘一次（throttle，不是 debounce；新 reportProgress 不重置窗口）
+  /// 最近一次交给仓库的进度（仅用于 flush 的日志）
   int? _lastWritePositionMs;
-  DateTime? _lastWriteAt;
-  static const Duration _throttleInterval = Duration(seconds: 5);
 
   /// 由 VideoPageController.init(params) 调用
   void registerSource({
@@ -76,7 +74,6 @@ class HistoryProgressReporter {
     _currentType = type;
     _videoTitle = title;
     _videoCover = cover;
-    _lastWriteAt = null;
     _lastWritePositionMs = null;
   }
 
@@ -88,14 +85,13 @@ class HistoryProgressReporter {
     await flush();
     _currentSourceId = null;
     _currentType = HistoryType.video;
-    _lastWriteAt = null;
     _lastWritePositionMs = null;
   }
 
-  /// 由 PlayerController.syncPlaybackState 在 position 变化时调用
+  /// 由播放定时器每秒调用（门控在调用方：播放中 + 非加载）。
   ///
-  /// 5s throttle：同一 source 在 5 秒内最多写盘一次。
-  /// 退出时由 [clearSource]/[flush] 强制写最后一次。
+  /// 照 Kazumi：**不设时间节流**，每次调用都交给仓库；退出时由
+  /// [clearSource]/[flush] 再强制写最后一次。
   void reportProgress({
     required int positionMs,
     required int durationMs,
@@ -111,14 +107,6 @@ class HistoryProgressReporter {
     if (title == null) return;
     final cover = _videoCover;
     if (cover == null) return;
-    final now = DateTime.now();
-    final sinceLast =
-        _lastWriteAt == null ? null : now.difference(_lastWriteAt!);
-    if (sinceLast != null && sinceLast < _throttleInterval) {
-      // 还在 throttle 窗口内，跳过写盘
-      return;
-    }
-    _lastWriteAt = now;
     _lastWritePositionMs = positionMs;
     final repo = _repoResolver();
     if (repo == null) return;
@@ -133,8 +121,8 @@ class HistoryProgressReporter {
         'durationMs': durationMs,
       },
     );
-    WywLogger().i('${LogTag.history} 写入播放进度 '
-        'sourceId=$sourceId positionMs=$positionMs（5s 节流窗口外）');
+    // 这里刻意不打日志：本方法现在每秒被调用一次（照 Kazumi），
+    // 每次写都记会刷屏。写入本身由仓库层按需记录。
   }
 
   /// 由 VideoPageController.stop() 调用，强制立即落盘最后一次

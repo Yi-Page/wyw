@@ -23,9 +23,8 @@ void main() {
     addTearDown(tester.view.reset);
     final positions = ItemPositionsListener.create();
     // 与阅读器一致：尾部占位 = 视口长度 - 末图长度（末图更高时为 0）
-    final tail = withTail
-        ? (viewport - lastImageExtent).clamp(0.0, viewport) + 2
-        : 0.0;
+    final tail =
+        withTail ? (viewport - lastImageExtent).clamp(0.0, viewport) + 2 : 0.0;
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
         body: ScrollablePositionedList.builder(
@@ -57,8 +56,7 @@ void main() {
   int topImage(ItemPositionsListener positions) =>
       readingTopImageIndex(positions.itemPositions.value, maxIndex: maxPage);
 
-  testWidgets('末图矮 + 没有尾部占位：读不到末页（旧 bug 的成因）',
-      (tester) async {
+  testWidgets('末图矮 + 没有尾部占位：读不到末页（旧 bug 的成因）', (tester) async {
     final positions = await pumpList(
       tester,
       lastImageExtent: 120,

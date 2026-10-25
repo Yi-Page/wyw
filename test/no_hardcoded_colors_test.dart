@@ -19,14 +19,13 @@ void main() {
 
     const whitelist = <String, String>{
       // 媒体铬层固定集定义处（唯一允许出现白/黑字面量的 UI 文件）。
-      'lib/bean/styles/media_chrome_colors.dart':
-          '媒体铬层最小固定集定义处',
+      'lib/bean/styles/media_chrome_colors.dart': '媒体铬层最小固定集定义处',
       // dev 工具终端配色（终端语义豁免，但必须具名）。
       'lib/bean/styles/js_console_colors.dart': 'JS 控制台配色定义处',
       // 主题种子色列表：用户可选"数据"，不是 UI。
       'lib/bean/settings/color_type.dart': '主题种子色 palette（用户可选数据）',
-      // 插件分类标识色（categorical palette，挂在 PluginType 枚举上的数据）。
-      'lib/plugins/plugin_type.dart': '插件分类标识色（categorical palette 数据）',
+      // 插件分类标识色（categorical palette，挂在 PluginCategory 模型上的数据）。
+      'lib/plugins/plugin_category.dart': '插件分类标识色（categorical palette 数据）',
       // ColorScheme 的构建/变换本身（OLED 纯黑增强等）。
       'lib/utils/theme.dart': '主题构建层',
       // 阅读画布 palette：novelBackground 设置的支撑数据。

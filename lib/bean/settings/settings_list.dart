@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:wyw/bean/widget/content_section.dart';
+import 'package:wyw/bean/widget/select_field.dart';
 import 'package:wyw/bean/widget/split_list_row.dart';
 
 enum _TileKind { plain, toggle, radio }
@@ -420,6 +421,75 @@ class SettingsTile<T> extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// 设置行的「下拉选择」变体。
+///
+/// 收敛改造前散落各处的 10 处手搓 `MenuAnchor` + `MenuItemButton` 样板
+/// （interface_settings ×2、player_settings ×3、theme_settings ×1、
+/// comic_reader_settings_page ×2、comic_reader_settings_sheet ×2）：那些实现各自重复
+/// controller 开合判断、`requestFocusOnHover: false`、
+/// `Container(height: 48, minWidth: 112/160) + Align + Text(选中 ? primary : null)`，
+/// 且菜单宽度、行高、选中态表现互不统一（选中只靠文字变色，没有 ✓）。
+///
+/// 这里改为复用 [SelectMenuButton]：整行可点即展开菜单、菜单宽度对齐值区域、
+/// 选中项打 ✓、禁用项置灰。
+class SelectTile<T> extends StatefulWidget {
+  const SelectTile({
+    super.key,
+    required this.title,
+    required this.value,
+    required this.options,
+    required this.onChanged,
+    this.leading,
+    this.description,
+    this.enabled = true,
+    this.placeholder = '请选择',
+  });
+
+  final Widget title;
+  final IconData? leading;
+  final Widget? description;
+
+  /// 当前选中值；不在 [options] 中时显示 [placeholder]。
+  final T? value;
+
+  final List<SelectOption<T>> options;
+  final ValueChanged<T> onChanged;
+  final bool enabled;
+
+  /// 无有效选中值时的兜底文案。
+  ///
+  /// 迁移自旧实现里 `map[value] ?? '默认值'` 的兜底写法（如阅读模式的
+  /// 「分页（从左到右）」）——存储值损坏时不至于显示成空白。
+  final String placeholder;
+
+  @override
+  State<SelectTile<T>> createState() => _SelectTileState<T>();
+}
+
+class _SelectTileState<T> extends State<SelectTile<T>> {
+  /// 由本行持有，让「点整行任意位置」与「点尾部值」走同一个弹层。
+  final SelectPopupController _popup = SelectPopupController();
+
+  @override
+  Widget build(BuildContext context) {
+    return SettingsTile(
+      leading: widget.leading,
+      title: widget.title,
+      description: widget.description,
+      enabled: widget.enabled,
+      onPressed: (_) => _popup.open(),
+      value: SelectMenuButton<T>(
+        controller: _popup,
+        value: widget.value,
+        options: widget.options,
+        onChanged: widget.onChanged,
+        enabled: widget.enabled,
+        placeholder: widget.placeholder,
       ),
     );
   }

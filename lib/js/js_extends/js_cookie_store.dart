@@ -54,6 +54,12 @@ class JsCookieStore {
   /// 已存储的 cookie 条数（调试用）。
   int get count => _byDomain.values.fold(0, (n, m) => n + m.length);
 
+  /// 清空全部已存 Cookie。
+  ///
+  /// 供"明确要求不留登录态"的收尾路径使用（例如 `Webview.close(keepCookies:false)`）：
+  /// 只清平台 WebView 的 Cookie 罐还不够——请求侧注入用的是本库。
+  void clear() => _byDomain.clear();
+
   void _ingestOne(Uri uri, String raw) {
     final segments = raw.split(';');
     if (segments.isEmpty) return;

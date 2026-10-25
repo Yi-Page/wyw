@@ -1,4 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+
+import 'package:wyw/services/platform/screen_orientation.dart';
 
 import 'widgets/comic_reader.dart';
 import 'comic_reader_controller.dart';
@@ -79,6 +83,25 @@ class _ComicReaderPageState extends State<ComicReaderPage> {
       onProgressChanged: widget.args.onProgressChanged,
       autoResume: widget.args.autoResume,
     );
+    // 阅读器方向：占用方向服务，按设置里的「漫画阅读器默认方向」生效
+    // （默认竖屏锁定）；退出时释放，不再把方向锁泄漏给后面的页面。
+    unawaited(
+      ScreenOrientationService.instance.acquire(
+        ScreenOrientationService.ownerReader,
+        ScreenOrientationService.readerPolicyFromSettings(),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    // 强制释放阅读器方向占用：这是此前「退出阅读器后整个 App 都转不动」的根因。
+    unawaited(
+      ScreenOrientationService.instance.release(
+        ScreenOrientationService.ownerReader,
+      ),
+    );
+    super.dispose();
   }
 
   @override

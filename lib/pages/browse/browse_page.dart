@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_mobx/flutter_mobx.dart';
 import 'package:flutter_modular/flutter_modular.dart';
@@ -28,7 +30,7 @@ class _BrowsePageState extends State<BrowsePage> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
-    _controller.refreshCategoryPlugins();
+    unawaited(_controller.refreshCategoryPlugins());
   }
 
   /// 按分类插件数量同步 TabController（数量为 0 时置空）。
@@ -65,7 +67,7 @@ class _BrowsePageState extends State<BrowsePage> with TickerProviderStateMixin {
             if (_controller.checkedPluginsCount != plugins.length) {
               _controller.checkedPluginsCount = plugins.length;
               WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (mounted) _controller.refreshCategoryPlugins();
+                if (mounted) unawaited(_controller.refreshCategoryPlugins());
               });
             }
             final categoryPlugins = _controller.categoryPlugins;
@@ -97,7 +99,8 @@ class _BrowsePageState extends State<BrowsePage> with TickerProviderStateMixin {
                     isScrollable: true,
                     controller: tc,
                     tabs: categoryPlugins
-                        .map((p) => Tab(text: p.name))
+                        .map((p) => Tab(
+                            text: _pluginController.displayNameOf(p.name)))
                         .toList(),
                   ),
                 ),

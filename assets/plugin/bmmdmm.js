@@ -20,7 +20,7 @@
 class bmmdmm extends PluginSource {
     name = '黑猫动漫'
     key = 'bmmdmm'
-    version = '1.0.0'
+    version = '1.0.1'
 
     baseUrl = 'https://www.bmmdmm.com';
 
@@ -620,7 +620,9 @@ class bmmdmm extends PluginSource {
                         style: 'text',
                         onTap: UI.Action({
                             method: 'play',
-                            args: [href, title + '(' + text + ')', cover],
+                            // title 只传作品名：集名由 sourceEpisodes[].name 承载，
+                            // 拼进 title 会污染播放器标题 / 历史 / 下载名。
+                            args: [href, title, cover],
                         }),
                     })
                 );

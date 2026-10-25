@@ -11,6 +11,7 @@ import 'package:wyw/services/storage/storage.dart';
 import 'package:wyw/services/player/pip_utils.dart';
 import 'package:wyw/bean/settings/settings_detail_scaffold.dart';
 import 'package:wyw/bean/settings/settings_list.dart';
+import 'package:wyw/bean/widget/select_field.dart';
 import 'package:wyw/utils/device.dart';
 
 class PlayerSettingsPage extends StatefulWidget {
@@ -46,9 +47,6 @@ class _PlayerSettingsPageState extends State<PlayerSettingsPage> {
   late int playerLogLevel;
   late int playerControllerLayerDisappearTime;
   late PlaybackDownloadMode playbackDownloadMode;
-  final MenuController playerAspectRatioMenuController = MenuController();
-  final MenuController playerLogLevelMenuController = MenuController();
-  final MenuController playbackDownloadModeMenuController = MenuController();
 
   @override
   void initState() {
@@ -339,6 +337,14 @@ class _PlayerSettingsPageState extends State<PlayerSettingsPage> {
                   },
                   title: const Text('超分辨率'),
                 ),
+                SettingsTile(
+                  leading: Icons.tune_rounded,
+                  onPressed: (_) async {
+                    context.pushNamed('/settings/player/filters/');
+                  },
+                  title: const Text('画面调节（滤镜预设）'),
+                  description: const Text('锐化、对比度、饱和度、亮度、伽马，可存多个预设'),
+                ),
               ],
             ),
             SettingsSection(
@@ -477,48 +483,17 @@ class _PlayerSettingsPageState extends State<PlayerSettingsPage> {
                   description: const Text('记录播放器内部日志'),
                   initialValue: playerDebugMode,
                 ),
-                SettingsTile(
+                SelectTile<int>(
                   leading: Icons.receipt_long_rounded,
-                  onPressed: (_) async {
-                    if (playerLogLevelMenuController.isOpen) {
-                      playerLogLevelMenuController.close();
-                    } else {
-                      playerLogLevelMenuController.open();
-                    }
-                  },
                   title: const Text('日志等级'),
                   description: const Text('播放器内部日志等级'),
-                  value: MenuAnchor(
-                    consumeOutsideTap: true,
-                    controller: playerLogLevelMenuController,
-                    builder: (_, __, ___) {
-                      return Text(
-                        playerLogLevelMap[playerLogLevel] ?? '???',
-                      );
-                    },
-                    menuChildren: [
-                      for (final entry in playerLogLevelMap.entries)
-                        MenuItemButton(
-                          requestFocusOnHover: false,
-                          onPressed: () => updatePlayerLogLevel(entry.key),
-                          child: Container(
-                            height: 48,
-                            constraints: BoxConstraints(minWidth: 112),
-                            child: Align(
-                              alignment: Alignment.centerLeft,
-                              child: Text(
-                                entry.value,
-                                style: TextStyle(
-                                  color: entry.key == playerLogLevel
-                                      ? Theme.of(context).colorScheme.primary
-                                      : null,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
+                  value: playerLogLevel,
+                  placeholder: '未知',
+                  options: [
+                    for (final entry in playerLogLevelMap.entries)
+                      SelectOption(value: entry.key, label: entry.value),
+                  ],
+                  onChanged: updatePlayerLogLevel,
                 ),
               ],
             ),
@@ -592,100 +567,51 @@ class _PlayerSettingsPageState extends State<PlayerSettingsPage> {
                   divisions: _playerControllerLayerDisappearDivisions,
                   onChanged: updatePlayerControllerLayerDisappearSeconds,
                 ),
-                SettingsTile(
+                SelectTile<PlayerAspectRatio>(
                   leading: Icons.aspect_ratio_rounded,
-                  onPressed: (_) async {
-                    if (playerAspectRatioMenuController.isOpen) {
-                      playerAspectRatioMenuController.close();
-                    } else {
-                      playerAspectRatioMenuController.open();
-                    }
-                  },
                   title: const Text('默认视频比例'),
-                  value: MenuAnchor(
-                    consumeOutsideTap: true,
-                    controller: playerAspectRatioMenuController,
-                    builder: (_, __, ___) {
-                      return Text(
-                        defaultAspectRatioMode.label,
-                      );
-                    },
-                    menuChildren: [
-                      for (final aspectRatioMode in PlayerAspectRatio.values)
-                        MenuItemButton(
-                          requestFocusOnHover: false,
-                          onPressed: () =>
-                              updateDefaultAspectRatioMode(aspectRatioMode),
-                          child: Container(
-                            height: 48,
-                            constraints: BoxConstraints(minWidth: 112),
-                            child: Align(
-                              alignment: Alignment.centerLeft,
-                              child: Text(
-                                aspectRatioMode.label,
-                                style: TextStyle(
-                                  color: aspectRatioMode ==
-                                          defaultAspectRatioMode
-                                      ? Theme.of(context).colorScheme.primary
-                                      : null,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
+                  value: defaultAspectRatioMode,
+                  options: [
+                    for (final mode in PlayerAspectRatio.values)
+                      SelectOption(value: mode, label: mode.label),
+                  ],
+                  onChanged: updateDefaultAspectRatioMode,
                 ),
               ],
             ),
             SettingsSection(
               title: const Text('下载协作'),
               tiles: [
-                SettingsTile(
+                SelectTile<PlaybackDownloadMode>(
                   leading: Icons.download_for_offline_rounded,
-                  onPressed: (_) async {
-                    if (playbackDownloadModeMenuController.isOpen) {
-                      playbackDownloadModeMenuController.close();
-                    } else {
-                      playbackDownloadModeMenuController.open();
-                    }
-                  },
                   title: const Text('播放下载模式'),
                   description: const Text(
                     '进入播放前的默认协作方式：无任务时可选 只播放 / 边播放边下载 / '
                     '只下载不进入；有任务时可选 直接播放 / 合流播放 / 不播放',
                   ),
-                  value: MenuAnchor(
-                    consumeOutsideTap: true,
-                    controller: playbackDownloadModeMenuController,
-                    builder: (_, __, ___) {
-                      return Text(
-                        playbackDownloadMode.label,
-                      );
-                    },
-                    menuChildren: [
-                      for (final mode in PlaybackDownloadMode.values)
-                        MenuItemButton(
-                          requestFocusOnHover: false,
-                          onPressed: () => updatePlaybackDownloadMode(mode),
-                          child: Container(
-                            height: 48,
-                            constraints: BoxConstraints(minWidth: 160),
-                            child: Align(
-                              alignment: Alignment.centerLeft,
-                              child: Text(
-                                mode.label,
-                                style: TextStyle(
-                                  color: mode == playbackDownloadMode
-                                      ? Theme.of(context).colorScheme.primary
-                                      : null,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                    ],
+                  value: playbackDownloadMode,
+                  options: [
+                    for (final mode in PlaybackDownloadMode.values)
+                      SelectOption(value: mode, label: mode.label),
+                  ],
+                  onChanged: updatePlaybackDownloadMode,
+                ),
+                SettingsTile.switchTile(
+                  leading: Icons.repeat_rounded,
+                  onToggle: (value) async {
+                    final v = value ??
+                        !GStorage.getSetting<bool>(
+                            SettingsKeys.followPlayModeInPlayer);
+                    await GStorage.putSetting<bool>(
+                        SettingsKeys.followPlayModeInPlayer, v);
+                    setState(() {});
+                  },
+                  title: const Text('播放器内沿用所选方式'),
+                  description: const Text(
+                    '选择播放方式后，进入播放器切换集数时继续沿用（「选择播放方式」弹窗内开关的默认值）',
                   ),
+                  initialValue: GStorage.getSetting<bool>(
+                      SettingsKeys.followPlayModeInPlayer),
                 ),
               ],
             ),

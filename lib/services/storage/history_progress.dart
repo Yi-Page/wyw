@@ -1,3 +1,4 @@
+import 'package:wyw/modules/danmaku/danmaku_library_ref.dart';
 import 'package:wyw/services/storage/video_play_model.dart';
 
 /// 通用历史记录进度抽象
@@ -7,32 +8,6 @@ import 'package:wyw/services/storage/video_play_model.dart';
 /// Custom 透传原始 Map。
 abstract class HistoryProgress {
   Map<String, dynamic> toMap();
-}
-
-/// 视频进度：videoUrl + positionMs + durationMs
-class VideoProgress implements HistoryProgress {
-  final String videoUrl;
-  final int positionMs;
-  final int durationMs;
-
-  const VideoProgress({
-    required this.videoUrl,
-    required this.positionMs,
-    this.durationMs = 0,
-  });
-
-  @override
-  Map<String, dynamic> toMap() => {
-        'videoUrl': videoUrl,
-        'positionMs': positionMs,
-        'durationMs': durationMs,
-      };
-
-  factory VideoProgress.fromMap(Map m) => VideoProgress(
-        videoUrl: m['videoUrl'] as String,
-        positionMs: (m['positionMs'] as num).toInt(),
-        durationMs: ((m['durationMs'] as num?)?.toInt()) ?? 0,
-      );
 }
 
 /// 阅读进度：chapterId + charIndex + scrollY，以及重新进入小说阅读器所需的完整参数。
@@ -250,6 +225,18 @@ class VideoPlaybackProgress implements HistoryProgress {
   /// 最近一次观看时间（排序用，与 HistoryEntry.lastWatchTime 同步；null 表示未知）。
   final DateTime? lastWatchTime;
 
+  /// 这部作品选用的弹弹play 弹幕库条目信息（**作品级**；null = 还没选过）。
+  ///
+  /// 为什么放在进度记录里而不是单开一个箱：它天然属于"这部作品我上次是怎么播的"
+  /// 这件事，与进度同生共死——进度被清、被备份迁移、被私人模式跳过时，弹幕选择
+  /// 跟着一起走，不会出现"进度还在、弹幕库没了"或反之的错位。
+  ///
+  /// **刻意不存集映射**：用户确认"切集后需再点一次"，所以这里只有库、没有
+  /// "本地第几集 ↔ 库第几集"。要恢复自动沿用，只需在此对象里加一个
+  /// `Map<int,int> episodeMap`，不用改箱、不用改读写路径（见
+  /// `docs/danmaku-selection-plan.md` §6）。
+  final DanmakuLibraryRef? danmaku;
+
   const VideoPlaybackProgress({
     required this.videoId,
     this.sourceKey = '',
@@ -258,6 +245,7 @@ class VideoPlaybackProgress implements HistoryProgress {
     this.lastEpisodeIndex = 0,
     this.videoUrl = '',
     this.lastWatchTime,
+    this.danmaku,
   });
 
   /// 当前集（夹取到合法范围后取值；无集时返回 null）。
@@ -279,6 +267,7 @@ class VideoPlaybackProgress implements HistoryProgress {
         'lastEpisodeIndex': lastEpisodeIndex,
         'videoUrl': videoUrl,
         'lastWatchTime': lastWatchTime?.toIso8601String(),
+        'danmaku': danmaku?.toMap(),
       };
 
   factory VideoPlaybackProgress.fromMap(Map m) {
@@ -300,6 +289,15 @@ class VideoPlaybackProgress implements HistoryProgress {
       lastWatchTime: m['lastWatchTime'] is String
           ? DateTime.tryParse(m['lastWatchTime'] as String)
           : null,
+      // 旧记录没有这个字段 → null（"还没选过弹幕库"），不会被误判成坏数据；
+      // 解析出来的对象还要过一遍 isValid，避免把一条空壳记录显示成"当前使用"。
+      danmaku: _danmakuFromMap(m['danmaku']),
     );
+  }
+
+  static DanmakuLibraryRef? _danmakuFromMap(Object? raw) {
+    if (raw is! Map) return null;
+    final ref = DanmakuLibraryRef.fromMap(raw);
+    return ref.isValid ? ref : null;
   }
 }

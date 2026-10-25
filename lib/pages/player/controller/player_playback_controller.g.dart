@@ -9,6 +9,38 @@ part of 'player_playback_controller.dart';
 // ignore_for_file: non_constant_identifier_names, unnecessary_brace_in_string_interps, unnecessary_lambdas, prefer_expression_function_bodies, lines_longer_than_80_chars, avoid_as, avoid_annotating_with_dynamic, no_leading_underscores_for_local_identifiers
 
 mixin _$PlayerPlaybackController on _PlayerPlaybackController, Store {
+  late final _$playerDebugModeAtom =
+      Atom(name: '_PlayerPlaybackController.playerDebugMode', context: context);
+
+  @override
+  bool get playerDebugMode {
+    _$playerDebugModeAtom.reportRead();
+    return super.playerDebugMode;
+  }
+
+  @override
+  set playerDebugMode(bool value) {
+    _$playerDebugModeAtom.reportWrite(value, super.playerDebugMode, () {
+      super.playerDebugMode = value;
+    });
+  }
+
+  late final _$buttonSkipTimeAtom =
+      Atom(name: '_PlayerPlaybackController.buttonSkipTime', context: context);
+
+  @override
+  int get buttonSkipTime {
+    _$buttonSkipTimeAtom.reportRead();
+    return super.buttonSkipTime;
+  }
+
+  @override
+  set buttonSkipTime(int value) {
+    _$buttonSkipTimeAtom.reportWrite(value, super.buttonSkipTime, () {
+      super.buttonSkipTime = value;
+    });
+  }
+
   late final _$superResolutionModeAtom = Atom(
       name: '_PlayerPlaybackController.superResolutionMode', context: context);
 
@@ -219,6 +251,8 @@ mixin _$PlayerPlaybackController on _PlayerPlaybackController, Store {
   @override
   String toString() {
     return '''
+playerDebugMode: ${playerDebugMode},
+buttonSkipTime: ${buttonSkipTime},
 superResolutionMode: ${superResolutionMode},
 volume: ${volume},
 loading: ${loading},

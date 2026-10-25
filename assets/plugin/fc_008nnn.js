@@ -18,7 +18,7 @@
 class fc_008nnn extends PluginSource {
     name = '风车动漫'
     key = 'fc_008nnn'
-    version = '1.0.0'
+    version = '1.0.1'
     baseUrl = 'https://www.008nnn.com'
 
     /// 分类名称 → /type/ URL 段
@@ -433,7 +433,9 @@ class fc_008nnn extends PluginSource {
                     style: 'text',
                     onTap: UI.Action({
                         method: 'play',
-                        args: [href, title + ' ' + text, cover],
+                        // title 只传作品名：集名由 sourceEpisodes[].name 承载，
+                        // 拼进 title 会污染播放器标题 / 历史 / 下载名。
+                        args: [href, title, cover],
                     }),
                 }))
                 sourceEpisodes.push({

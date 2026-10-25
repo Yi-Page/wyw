@@ -82,10 +82,23 @@ class _MyPageState extends State<MyPage> {
                 context.pushNamed('/js-dev/');
               case MySpaceDestination.history:
                 context.pushNamed('/history/');
+              case MySpaceDestination.collect:
+                context.pushNamed('/collect/');
               case MySpaceDestination.downloads:
                 context.pushNamed('/settings/download/');
               case MySpaceDestination.settings:
                 context.pushNamed('/settings/');
+              // 常用设置（直达对应设置分类）
+              case MySpaceDestination.player:
+                context.pushNamed('/settings/player');
+              case MySpaceDestination.danmaku:
+                context.pushNamed('/settings/danmaku/');
+              case MySpaceDestination.comicReader:
+                context.pushNamed('/settings/comic-reader');
+              case MySpaceDestination.downloadSettings:
+                context.pushNamed('/settings/download-settings');
+              case MySpaceDestination.rules:
+                context.pushNamed('/settings/plugin/');
             }
           },
         ),

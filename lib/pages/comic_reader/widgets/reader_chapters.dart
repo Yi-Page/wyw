@@ -98,8 +98,10 @@ class _ChaptersViewState extends State<_ChaptersView> {
                   final chapter = chapters[realIndex];
                   final isActive = current == realIndex;
                   // 规范单位：图片序号（与阅读模式无关，画廊一屏多张也准）
-                  final imageIndex = widget.reader.imageIndexOfChapter(realIndex);
-                  final imageCount = widget.reader.imageCountOfChapter(realIndex);
+                  final imageIndex =
+                      widget.reader.imageIndexOfChapter(realIndex);
+                  final imageCount =
+                      widget.reader.imageCountOfChapter(realIndex);
                   final progressText = imageIndex >= 1
                       ? (imageCount > 0
                           ? '看到第 $imageIndex / $imageCount 张'

@@ -492,6 +492,9 @@ let Network = {
             e.retryable = !!err.retryable;
             e.status = err.status || 0;
             if (err.headers) e.headers = err.headers;
+            // 非 2xx 的响应体（Dart 侧截断后回传）：反爬/参数错误的真实原因
+            // 通常只在 body 里，不带上就只能看到笼统的 "HTTP 400"。
+            if (err.body) e.body = err.body;
         }
         return e;
     },
@@ -748,6 +751,223 @@ async function fetch(url, options) {
 async function http(url, options) {
     return Network.http(url, options);
 }
+
+/**
+ * Webview 工具类：系统 WebView 的「一次性取页」与「交互会话（留页式）」入口。
+ *
+ * 对应 Dart 侧 JsWebview（sendMessage({method: 'webview', function: ...})）。
+ * 与 Network 的分工：
+ *   - Network.get / post / fetch ...   纯 HTTP（Dio），自动带上会话 Cookie，不渲染 JS；
+ *   - Network.getHtml / Network.webview  一次性取页，返回渲染后的 HTML；
+ *   - Webview.*                        需要「把页面留着」的交互流程：
+ *                                      open → awaitImage → fillAndClick → awaitGone
+ *                                      → getHtml / getUserAgent → close。
+ *
+ * session 语义：同一 session 下，一次性取页与交互会话各自一个 WebView 实例，
+ * 但**共用同一份 Cookie 库**（按 session 分库）；不同 session 相互隔离。
+ * Cookie 的真理源在 WebView 模块，Network.* 的请求前注入 / 响应后摄入都取自它，
+ * 因此验证通过后直接 Network.get 就能带上 clearance cookie。
+ *
+ * 失败一律 reject 一个带 kind / status / body 的 Error（复用 Network._toError 的
+ * 结构定义），其 message 与 Dart 侧 error.message 逐字一致，便于插件按 e.kind 分支。
+ * @namespace Webview
+ */
+let Webview = {
+    /**
+     * 校验 Dart 侧返回：`{error}` → 抛结构化 Error；非 `{ok:true}` → 抛普通 Error。
+     *
+     * 抽成一处，保证所有成员的错误形状（kind / status / body）只有一个来源。
+     * @param {Object} result - sendMessage 的返回值
+     * @param {string} what - 调用名（用于报错定位，如 'Webview.open'）
+     * @returns {Object} 原样返回 result
+     */
+    _ensure(result, what) {
+        if (result && result.error) throw Network._toError(result.error);
+        if (!result || result.ok !== true) {
+            throw new Error(what + ': Dart 侧未返回 ok（function 是否被支持？）');
+        }
+        return result;
+    },
+
+    /**
+     * 打开（或重载）一个交互会话，页面会**留着**直到 close。
+     *
+     * 对同一 session 重复调用 = 重新加载页面（验证码「换一张」场景），实例复用。
+     * @param {string} url - 要加载的页面地址
+     * @param {Object} [options]
+     * @param {string} [options.session] - 会话键（默认 ''）
+     * @param {'image'|'button'|'script'} [options.mode='image'] - 验证码形态
+     * @param {string} [options.captchaXpath] - mode='image' 时验证码图片/元素的 XPath
+     * @param {string} [options.inputXpath] - mode='image' 时先 focus 的输入框 XPath（部分站点 focus 后才下发验证码图）
+     * @param {string} [options.buttonXpath] - mode='button' 时要自动点击的按钮 XPath（image 模式的提交按钮在 fillAndClick 里传）
+     * @param {string} [options.script] - mode='script' 时的自定义脚本
+     * @param {number} [options.timeout=30] - 等页面进入可用状态的秒数（超时不判失败）
+     * @param {number} [options.maxLifetimeMs] - 会话最长寿命（毫秒，clamp 30s..15min；非正值=用默认 5min）
+     * @returns {Promise<string>} 最终落地地址 finalUrl（跟随跳转后）
+     */
+    async open(url, options) {
+        const opts = options || {};
+        const r = Webview._ensure(await sendMessage({
+            method: 'webview',
+            function: 'open',
+            url: url,
+            session: opts.session,
+            mode: opts.mode,
+            captchaXpath: opts.captchaXpath,
+            inputXpath: opts.inputXpath,
+            buttonXpath: opts.buttonXpath,
+            script: opts.script,
+            timeout: opts.timeout,
+            maxLifetimeMs: opts.maxLifetimeMs,
+        }), 'Webview.open');
+        return r.finalUrl || '';
+    },
+
+    /**
+     * 在留着的那个页面里执行任意 JS。
+     * @param {string} js - JS 源码 / 表达式
+     * @param {Object} [options]
+     * @param {string} [options.session] - 会话键（默认 ''）
+     * @returns {Promise<string|null>} 执行结果字符串；不可序列化时为 null
+     */
+    async exec(js, options) {
+        const opts = options || {};
+        const r = Webview._ensure(await sendMessage({
+            method: 'webview',
+            function: 'exec',
+            session: opts.session,
+            js: js,
+        }), 'Webview.exec');
+        return r.value === undefined ? null : r.value;
+    },
+
+    /**
+     * 取当前页面 HTML（页面仍在 loading 时可能为空串）。
+     * @param {Object} [options]
+     * @param {string} [options.session] - 会话键（默认 ''）
+     * @returns {Promise<string>} 当前页面 HTML
+     */
+    async getHtml(options) {
+        const opts = options || {};
+        const r = Webview._ensure(await sendMessage({
+            method: 'webview',
+            function: 'getHtml',
+            session: opts.session,
+        }), 'Webview.getHtml');
+        return r.html || '';
+    },
+
+    /**
+     * 取 WebView 实际使用的 User-Agent。
+     *
+     * 反爬场景必须把它和 Cookie 一起用于后续请求（clearance cookie 常与 UA 绑定）。
+     * @param {Object} [options]
+     * @param {string} [options.session] - 会话键（默认 ''）
+     * @returns {Promise<string>} User-Agent
+     */
+    async getUserAgent(options) {
+        const opts = options || {};
+        const r = Webview._ensure(await sendMessage({
+            method: 'webview',
+            function: 'getUserAgent',
+            session: opts.session,
+        }), 'Webview.getUserAgent');
+        return r.userAgent || '';
+    },
+
+    /**
+     * 在留着的那个页面里回填验证码并点击提交按钮。
+     * @param {Object} options
+     * @param {string} options.session - 会话键（默认 ''）
+     * @param {string} options.code - 验证码文本
+     * @param {string} options.inputXpath - 输入框 XPath
+     * @param {string} options.buttonXpath - 提交按钮 XPath
+     * @returns {Promise<void>}
+     */
+    async fillAndClick(options) {
+        const opts = options || {};
+        Webview._ensure(await sendMessage({
+            method: 'webview',
+            function: 'fillAndClick',
+            session: opts.session,
+            code: opts.code,
+            inputXpath: opts.inputXpath,
+            buttonXpath: opts.buttonXpath,
+        }), 'Webview.fillAndClick');
+    },
+
+    /**
+     * 等验证码图片出现（图片早于本调用到达也不会丢，Dart 侧已缓存）。
+     * @param {Object} [options]
+     * @param {string} [options.session] - 会话键（默认 ''）
+     * @param {number} [options.timeout=30] - 超时秒数
+     * @returns {Promise<string>} PNG 的 dataURL（data:image/png;base64,...）
+     */
+    async awaitImage(options) {
+        const opts = options || {};
+        const r = Webview._ensure(await sendMessage({
+            method: 'webview',
+            function: 'awaitImage',
+            session: opts.session,
+            timeout: opts.timeout,
+        }), 'Webview.awaitImage');
+        return r.image || '';
+    },
+
+    /**
+     * 等验证通过（验证码元素消失 / 自动点击后导航 / 自定义脚本 done）。
+     *
+     * 通过后 Dart 侧会同步一次页面 Cookie 到会话库，随后 Network.* 即可带登录态。
+     * @param {Object} [options]
+     * @param {string} [options.session] - 会话键（默认 ''）
+     * @param {number} [options.timeout=60] - 超时秒数
+     * @returns {Promise<void>}
+     */
+    async awaitGone(options) {
+        const opts = options || {};
+        Webview._ensure(await sendMessage({
+            method: 'webview',
+            function: 'awaitGone',
+            session: opts.session,
+            timeout: opts.timeout,
+        }), 'Webview.awaitGone');
+    },
+
+    /**
+     * 关闭交互会话（收尾）。
+     * @param {Object} [options]
+     * @param {string} [options.session] - 会话键（默认 ''）
+     * @param {boolean} [options.keepCookies=true] - true 保留登录态；false = 这次验证一点都不留
+     *   （既清平台 WebView Cookie，也清该 session 的会话 Cookie 库；验证流程请用专用 session，
+     *   否则会把该 session 早先通过 HTTP 拿到的 cookie 一起清掉）
+     * @param {boolean} [options.dispose=false] - true = 立刻销毁实例；默认留一个空闲窗口，
+     *     便于「换一张」快速重开
+     * @returns {Promise<void>}
+     */
+    async close(options) {
+        const opts = options || {};
+        Webview._ensure(await sendMessage({
+            method: 'webview',
+            function: 'close',
+            session: opts.session,
+            keepCookies: opts.keepCookies,
+            dispose: opts.dispose,
+        }), 'Webview.close');
+    },
+
+    /**
+     * 查询指定会话已同步的 Cookie 字符串（"k1=v1; k2=v2"）。
+     *
+     * 与 Network.cookies 同源（同一个会话 Cookie 库），语义见 Network.cookies。
+     * @param {string} url - 目标地址（按域后缀 + 路径匹配）
+     * @param {string} [session] - 会话键（默认 ''）
+     * @returns {Promise<string>} Cookie 字符串，可能为空串
+     */
+    async cookies(url, session) {
+        const result = await sendMessage({ method: 'get_cookies', url: url || '', session: session });
+        return (result && result.cookies) || '';
+    },
+};
 
 /**
  * HtmlDocument class for parsing HTML and querying elements.
@@ -1171,15 +1391,48 @@ function log(message, level) {
     });
 }
 
+/**
+ * 把 console.* 的多个参数拼成一行可读文本。
+ *
+ * 旧实现只取第一个参数（`log: (content) => ...`），导致插件里
+ * `console.log('[key]', '请求:', url, '页长:', html.length)` 这类多参数调试日志
+ * 只剩 `[key]`，排查问题时关键信息全丢。这里按 console 语义拼接：
+ * 字符串原样、对象走 JSON、Error 带 message + stack。
+ */
+function _formatLogArgs(args) {
+    const parts = [];
+    for (let i = 0; i < args.length; i++) {
+        const a = args[i];
+        if (a === null) {
+            parts.push('null');
+        } else if (a === undefined) {
+            parts.push('undefined');
+        } else if (typeof a === 'string') {
+            parts.push(a);
+        } else if (typeof a === 'number' || typeof a === 'boolean') {
+            parts.push(String(a));
+        } else if (a instanceof Error) {
+            parts.push(a.stack ? a.message + '\n' + a.stack : a.message);
+        } else {
+            try {
+                parts.push(JSON.stringify(a));
+            } catch (e) {
+                parts.push(String(a));
+            }
+        }
+    }
+    return parts.join(' ');
+}
+
 let console = {
-    log: (content) => {
-        log(content, 'info');
+    log: (...args) => {
+        log(_formatLogArgs(args), 'info');
     },
-    warn: (content) => {
-        log(content, 'warn');
+    warn: (...args) => {
+        log(_formatLogArgs(args), 'warn');
     },
-    error: (content) => {
-        log(content, 'error');
+    error: (...args) => {
+        log(_formatLogArgs(args), 'error');
     },
 };
 
@@ -1312,24 +1565,62 @@ function ImageLoadingConfig({url, method, data, headers, onResponse, modifyImage
     this.onLoadFailed = onLoadFailed;
 }
 
+/**
+ * 插件基类 —— **只有机制 + 一个能力探测器**。
+ *
+ * 分三类，界线很清楚：
+ *
+ *   1. **机制**（本类给实现，插件直接用）：
+ *      `loadData` / `saveData` / `deleteData`（自由存储，命名空间 = 类名）、
+ *      `loadSetting` / `saveSetting`（设置项的值）、`isLogged`、`init`（构造期钩子）。
+ *
+ *   2. **能力**（本类**故意不给实现**）：`getCategory` / `getCategoryOptions` /
+ *      `loadCategory` / `getImageLoadingConfig` / `getSettings`，以及 `search` /
+ *      `getDetail` / `openReader` / `getUrl` 这些约定方法 —— 只有插件自己实现。
+ *      宿主用 [implementsMethod] 判断「这个插件有没有这个功能」，有才调用。
+ *      **一旦基类给它们留空实现，那个判断就永远为真**（每个插件看起来都实现了），
+ *      所以这里坚决不留。想在内部展示名 / 存别的东西，用自己的字段。
+ *
+ *   3. **宿主元数据**（基类里没有、实例上也没有）：展示名 / 分类 / 版本 / 主页 /
+ *      描述 / 是否启用 / 排序…全部是宿主台账，存在 `plugins/index.json`，
+ *      插件代码里不出现。见 docs/plugin-storage-spec.md。
+ *
+ * **存储命名空间 = 类名**：`loadData` / `saveData` / `deleteData` / `loadSetting` /
+ * `saveSetting` / `isLogged` 全部用 `this.constructor.name` 作为桥消息里的 `key`
+ * （= 插件名，命名链保证），**不经过任何插件可声明的属性**。
+ *
+ * 本类因此**没有** `key` 成员：插件在类体里写 `key = '…'` 只会得到它自己的一份死数据，
+ * 基类不读它，也影响不到存储命名空间 —— 不会再有「插件自己定义 key 把数据写到别处」
+ * 这种事。插件要在自己的文案 / 描述符里带名字，直接写 `this.constructor.name`。
+ */
 class PluginSource {
-    name = ""
-
-    key = ""
-
-    version = ""
-
     /**
-     * load data with its key
-     * @param {string} dataKey
-     * @returns {any}
+     * 本插件**自己**实现了 [name] 吗？—— 基类唯一的「能力」相关成员。
+     *
+     * 只认「插件自己写的**可调用**成员」：
+     *   - 实例自有属性（`search = async () => {}` 这种字段式写法）；
+     *   - 插件自己的原型链上的方法（`search() {}` 这种常规写法）。
+     * 基类 `PluginSource.prototype` 上的成员一律**不算**；同名但值不是函数的
+     * 自有属性（例如 `getCategory = null` 显式关掉某个能力）也**不算**。
+     * 这正是本类不给能力方法留空实现的原因：留了空实现，
+     * `typeof this.m === 'function'` 就分辨不出「插件实现了」和「基类兜底」。
+     *
+     * 宿主侧（Dart）用同一套规则探测能力，见 `PluginController.hasMethod`。
+     *
+     * @param {string} name 方法名，如 'getCategory'
+     * @returns {boolean}
      */
-    loadData(dataKey) {
-        return sendMessage({
-            method: 'load_data',
-            key: this.key,
-            data_key: dataKey
-        })
+    implementsMethod(name) {
+        const owns = (obj) =>
+            Object.prototype.hasOwnProperty.call(obj, name) &&
+            typeof obj[name] === 'function'
+        if (owns(this)) return true
+        let proto = Object.getPrototypeOf(this)
+        while (proto && proto !== PluginSource.prototype) {
+            if (owns(proto)) return true
+            proto = Object.getPrototypeOf(proto)
+        }
+        return false
     }
 
     /**
@@ -1340,7 +1631,7 @@ class PluginSource {
     loadSetting(key) {
         return sendMessage({
             method: 'load_setting',
-            key: this.key,
+            key: this.constructor.name,
             setting_key: key
         })
     }
@@ -1353,76 +1644,23 @@ class PluginSource {
     saveSetting(settingKey, value) {
         return sendMessage({
             method: 'save_setting',
-            key: this.key,
+            key: this.constructor.name,
             setting_key: settingKey,
             data: value
         })
     }
 
     /**
-     * get settings schema declared by the plugin
-     * @returns {Object} settings
+     * load data with its key
+     * @param {string} dataKey
+     * @returns {any}
      */
-    getSettings() {
-        return this.settings || {}
-    }
-
-    /**
-     * Get image loading config for an image.
-     *
-     * 插件可覆写此方法为阅读器下载的每张图提供自定义配置（与 venera 的
-     * `comic.onImageLoad` 对应）。返回值：
-     *   - url {string?} — 覆盖请求地址
-     *   - method {string?} — 覆盖请求方法（大写）
-     *   - data {any?} — 请求体
-     *   - headers {Object?} — 自定义请求头（如鉴权 token / referer）
-     *   - modifyImage {string?} — JS 脚本字符串，在独立 Isolate 中执行，
-     *     脚本需定义 `function modifyImage(image) { ... return newImage; }`
-     *     用于切片打乱还原
-     *
-     * @param {string} url 图片地址
-     * @param {string} comicId 漫画 id
-     * @param {string} epId 章节 id
-     * @returns {Object} 图片加载配置
-     */
-    getImageLoadingConfig(url, comicId, epId) {
-        return {}
-    }
-
-    /**
-     * Get category browse data for this source (venera 的 `category` 对应)。
-     *
-     * 返回值结构：
-     *   - title {string} — 分类页标题
-     *   - parts {Array} — 分组列表，每项 `{name, categories: string[]}`
-     *
-     * @returns {Object|null} 不支持分类浏览时返回 null
-     */
-    getCategory() {
-        return null
-    }
-
-    /**
-     * Get filter options for a category (venera 的 `categoryComics.optionLoader` 对应)。
-     *
-     * 用于需要额外筛选的分类（如每週必看按期数/类型）。无选项时返回 null。
-     *
-     * @param {string} category 分类名
-     * @returns {Array|null} `[{label, options: [{value, text}]}]`，无选项返回 null
-     */
-    getCategoryOptions(category) {
-        return null
-    }
-
-    /**
-     * Load comics of a category (venera 的 `categoryComics.load` 对应)。
-     *
-     * @param {string} category 分类名
-     * @param {number} [page] 页码（1-based）
-     * @returns {Array} List<UI.Card>
-     */
-    loadCategory(category, page = 1) {
-        return []
+    loadData(dataKey) {
+        return sendMessage({
+            method: 'load_data',
+            key: this.constructor.name,
+            data_key: dataKey
+        })
     }
 
     /**
@@ -1433,7 +1671,7 @@ class PluginSource {
     saveData(dataKey, data) {
         return sendMessage({
             method: 'save_data',
-            key: this.key,
+            key: this.constructor.name,
             data_key: dataKey,
             data: data
         })
@@ -1446,7 +1684,7 @@ class PluginSource {
     deleteData(dataKey) {
         return sendMessage({
             method: 'delete_data',
-            key: this.key,
+            key: this.constructor.name,
             data_key: dataKey,
         })
     }
@@ -1458,26 +1696,18 @@ class PluginSource {
     get isLogged() {
         return sendMessage({
             method: 'isLogged',
-            key: this.key,
+            key: this.constructor.name,
         });
     }
 
-    translation = {}
-
     /**
-     * Translate given string with the current locale using the translation object.
-     * @param key {string}
-     * @returns {string}
-     * @since 1.2.5
+     * 构造期钩子：**没有默认行为**，插件想在被 new 出来时做初始化就覆写它，
+     * 并在自己的构造函数里 `this.init()`（宿主不会替你调）。
+     *
+     * 这里留空实现是无害的 —— 它是生命周期钩子，没有谁会去探测「你实现了吗」，
+     * 与上面那批能力方法不是一回事。
      */
-    translate(key) {
-        let locale = APP.locale;
-        return this.translation[locale]?.[key] ?? key;
-    }
-
     init() { }
-
-    static sources = {}
 }
 
 /// A reference to dart object.
@@ -1716,16 +1946,6 @@ let APP = {
     get version() {
         // 引擎可能未注入 appVersion（历史遗漏）：typeof 对未声明变量安全，取不到返回空串
         return typeof appVersion !== 'undefined' ? appVersion : ''
-    },
-
-    /**
-     * Get current app locale
-     * @returns {string} - The app locale, in the format of [languageCode]_[countryCode]
-     */
-    get locale() {
-        return sendMessage({
-            method: 'getLocale'
-        })
     },
 
     /**

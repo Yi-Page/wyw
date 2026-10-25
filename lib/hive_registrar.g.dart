@@ -4,10 +4,12 @@
 
 import 'package:hive_ce/hive_ce.dart';
 import 'package:wyw/modules/download/download_module.dart';
+import 'package:wyw/services/storage/collect_entry.dart';
 import 'package:wyw/services/storage/history_entry.dart';
 
 extension HiveRegistrar on HiveInterface {
   void registerAdapters() {
+    registerAdapter(CollectEntryAdapter());
     registerAdapter(DownloadEpisodeAdapter());
     registerAdapter(DownloadRecordAdapter());
     registerAdapter(HistoryEntryAdapter());
@@ -16,6 +18,7 @@ extension HiveRegistrar on HiveInterface {
 
 extension IsolatedHiveRegistrar on IsolatedHiveInterface {
   void registerAdapters() {
+    registerAdapter(CollectEntryAdapter());
     registerAdapter(DownloadEpisodeAdapter());
     registerAdapter(DownloadRecordAdapter());
     registerAdapter(HistoryEntryAdapter());

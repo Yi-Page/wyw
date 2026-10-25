@@ -1,17 +1,21 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_modular/flutter_modular.dart';
 import 'package:dynamic_color/dynamic_color.dart';
 import 'package:flutter_displaymode/flutter_displaymode.dart';
+import 'package:wyw/services/platform/screen_orientation.dart';
 import 'package:wyw/services/storage/storage.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:wyw/services/logging/logger.dart';
 import 'package:wyw/services/logging/log_tags.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:wyw/bean/dialog/dialog_helper.dart';
+import 'package:wyw/bean/dialog/exit_confirmation_dialog.dart';
 import 'package:wyw/bean/settings/color_type.dart';
 import 'package:wyw/bean/settings/theme_provider.dart';
+import 'package:wyw/bean/widget/desktop_semantics_gate.dart';
 import 'package:wyw/navigation.dart';
 import 'package:wyw/utils/constants.dart';
 import 'package:wyw/utils/device.dart';
@@ -27,7 +31,7 @@ class AppWidget extends StatefulWidget {
 class _AppWidgetState extends State<AppWidget>
     with TrayListener, WidgetsBindingObserver, WindowListener {
   final TrayManager trayManager = TrayManager.instance;
-  bool showingExitDialog = false;
+  bool _isHandlingWindowClose = false;
   bool _didApplyStoredThemeSettings = false;
   Brightness? _lastTitleBarBrightness;
 
@@ -38,6 +42,9 @@ class _AppWidgetState extends State<AppWidget>
     windowManager.addListener(this);
     WidgetsBinding.instance.addObserver(this);
     _initializePlatformIntegrations();
+    // 应用方向（播放器 / 阅读器之外的界面）：读设置、查系统旋转开关、按上。
+    // 页面级方向由各自页面 acquire/release，这里只负责基准策略。
+    unawaited(ScreenOrientationService.instance.init());
   }
 
   Future<void> _initializePlatformIntegrations() async {
@@ -189,72 +196,44 @@ class _AppWidgetState extends State<AppWidget>
 
   /// 处理窗口关闭事件，
   /// 需要使用 `windowManager.close()` 来触发，`exit(0)` 会直接退出程序
+  // windowManager.close() triggers this handler; exit() bypasses confirmation.
   @override
-  void onWindowClose() {
-    final exitBehavior = GStorage.getSetting(SettingsKeys.exitBehavior);
+  Future<void> onWindowClose() async {
+    if (_isHandlingWindowClose || !mounted) return;
+    _isHandlingWindowClose = true;
+    try {
+      var action = switch (GStorage.getSetting(SettingsKeys.exitBehavior)) {
+        0 => ExitDialogAction.exit,
+        1 => ExitDialogAction.minimizeToTray,
+        _ => null,
+      };
+      if (action == null) {
+        final result = await WywDialog.show<ExitDialogResult>(
+          builder: (_) => const ExitConfirmationDialog(),
+        );
+        if (result == null || !mounted) return;
 
-    switch (exitBehavior) {
-      case 0:
-        exit(0);
-      case 1:
-        WywDialog.dismiss();
-        windowManager.hide();
-        break;
-      default:
-        if (showingExitDialog) return;
-        showingExitDialog = true;
-        WywDialog.show(onDismiss: () {
-          showingExitDialog = false;
-        }, builder: (context) {
-          bool saveExitBehavior = false; // 下次不再询问？
-
-          return AlertDialog(
-            title: const Text('退出确认'),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Text('您想要退出 Wyw 吗？'),
-                const SizedBox(height: 24),
-                StatefulBuilder(builder: (context, setState) {
-                  onChanged(value) {
-                    saveExitBehavior = value ?? false;
-                    setState(() {});
-                  }
-
-                  return Wrap(
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    spacing: 8,
-                    children: [
-                      Checkbox(value: saveExitBehavior, onChanged: onChanged),
-                      const Text('下次不再询问'),
-                    ],
-                  );
-                }),
-              ],
-            ),
-            actions: [
-              TextButton(
-                  onPressed: () async {
-                    if (saveExitBehavior) {
-                      await GStorage.putSetting(SettingsKeys.exitBehavior, 0);
-                    }
-                    exit(0);
-                  },
-                  child: const Text('退出 Wyw')),
-              TextButton(
-                  onPressed: () async {
-                    if (saveExitBehavior) {
-                      await GStorage.putSetting(SettingsKeys.exitBehavior, 1);
-                    }
-                    WywDialog.dismiss();
-                    windowManager.hide();
-                  },
-                  child: const Text('最小化至托盘')),
-              const TextButton(onPressed: WywDialog.dismiss, child: Text('取消')),
-            ],
+        action = result.action;
+        if (result.rememberChoice) {
+          await GStorage.putSetting(
+            SettingsKeys.exitBehavior,
+            switch (action) {
+              ExitDialogAction.exit => 0,
+              ExitDialogAction.minimizeToTray => 1,
+            },
           );
-        });
+        }
+      }
+
+      if (!mounted) return;
+      switch (action) {
+        case ExitDialogAction.exit:
+          exit(0);
+        case ExitDialogAction.minimizeToTray:
+          await windowManager.hide();
+      }
+    } finally {
+      _isHandlingWindowClose = false;
     }
   }
 
@@ -332,20 +311,22 @@ class _AppWidgetState extends State<AppWidget>
             ? oledDarkTheme(dynamicDarkTheme)
             : dynamicDarkTheme;
 
-        return MaterialApp.router(
-          title: 'Wyw',
-          localizationsDelegates: GlobalMaterialLocalizations.delegates,
-          supportedLocales: const [
-            Locale.fromSubtags(
-                languageCode: 'zh', scriptCode: 'Hans', countryCode: 'CN')
-          ],
-          locale: const Locale.fromSubtags(
-              languageCode: 'zh', scriptCode: 'Hans', countryCode: 'CN'),
-          theme: lightTheme,
-          darkTheme: effectiveDarkTheme,
-          themeMode: themeProvider.themeMode,
-          scaffoldMessengerKey: rootScaffoldMessengerKey,
-          routerConfig: ModularApp.routerConfigOf(context),
+        return DesktopSemanticsGate(
+          child: MaterialApp.router(
+            title: 'Wyw',
+            localizationsDelegates: GlobalMaterialLocalizations.delegates,
+            supportedLocales: const [
+              Locale.fromSubtags(
+                  languageCode: 'zh', scriptCode: 'Hans', countryCode: 'CN')
+            ],
+            locale: const Locale.fromSubtags(
+                languageCode: 'zh', scriptCode: 'Hans', countryCode: 'CN'),
+            theme: lightTheme,
+            darkTheme: effectiveDarkTheme,
+            themeMode: themeProvider.themeMode,
+            scaffoldMessengerKey: rootScaffoldMessengerKey,
+            routerConfig: ModularApp.routerConfigOf(context),
+          ),
         );
       },
     );

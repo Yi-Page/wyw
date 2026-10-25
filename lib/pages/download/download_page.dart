@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_mobx/flutter_mobx.dart';
-import 'package:flutter_modular/flutter_modular.dart';
 import 'package:wyw/bean/appbar/app_bar_menu_button.dart';
 import 'package:wyw/bean/appbar/sys_app_bar.dart';
 import 'package:wyw/bean/dialog/dialog_helper.dart';
@@ -8,8 +7,7 @@ import 'package:wyw/bean/widget/empty_state_widget.dart';
 import 'package:wyw/modules/download/download_module.dart';
 import 'package:wyw/pages/download/download_controller.dart';
 import 'package:wyw/pages/download/download_widgets.dart';
-import 'package:wyw/pages/video/video_route_args.dart';
-import 'package:wyw/services/storage/video_play_model.dart';
+import 'package:wyw/pages/video/video_entry_launcher.dart';
 import 'package:wyw/utils/format.dart';
 
 class DownloadPage extends StatefulWidget {
@@ -129,9 +127,37 @@ class _DownloadPageState extends State<DownloadPage> {
       episode: episode,
       statusText: _getStatusText(record, episode),
       actions: _getActionButtons(record, episode),
-      onPlay: episode.status == DownloadStatus.completed
+      onPlay: _canPlayFromDownloadPage(episode)
           ? () => _playEpisode(record, episode)
           : null,
+    );
+  }
+
+  /// 这一条能不能从下载页点进播放页。
+  ///
+  ///   - 已完成 → 播本地文件；
+  ///   - **进行中 / 已暂停且有直链 → 边下边播（合流）**。
+  ///
+  /// 后者是从下载页回到"正在看的那一集"的主路径：任务里已经有直链，合流快路径会
+  /// 直接复用它，不需要重新解析。没直链（刚入队、还在解析）时不给入口，避免点下去
+  /// 只能报错。
+  static bool _canPlayFromDownloadPage(DownloadEpisode episode) {
+    if (episode.status == DownloadStatus.completed) return true;
+    if (episode.status != DownloadStatus.downloading &&
+        episode.status != DownloadStatus.paused) {
+      return false;
+    }
+    return episode.networkM3u8Url.isNotEmpty;
+  }
+
+  /// 「边下边播」按钮：进行中 / 已暂停且有直链时出现在暂停、继续旁边。
+  Widget _mergePlayButton(DownloadRecord record, DownloadEpisode episode) {
+    return IconButton(
+      icon: Icon(Icons.play_circle_outline,
+          size: 20, color: Theme.of(context).colorScheme.primary),
+      onPressed: () => _playEpisode(record, episode),
+      tooltip: '边下边播',
+      visualDensity: VisualDensity.compact,
     );
   }
 
@@ -177,6 +203,9 @@ class _DownloadPageState extends State<DownloadPage> {
         ));
         break;
       case DownloadStatus.downloading:
+        if (_canPlayFromDownloadPage(episode)) {
+          buttons.add(_mergePlayButton(record, episode));
+        }
         buttons.add(IconButton(
           icon: const Icon(Icons.pause_rounded, size: 20),
           onPressed: () => downloadController.pauseDownload(
@@ -189,6 +218,9 @@ class _DownloadPageState extends State<DownloadPage> {
         ));
         break;
       case DownloadStatus.paused:
+        if (_canPlayFromDownloadPage(episode)) {
+          buttons.add(_mergePlayButton(record, episode));
+        }
         buttons.add(IconButton(
           icon: const Icon(Icons.play_arrow_rounded, size: 20),
           onPressed: () => downloadController.retryDownload(
@@ -242,43 +274,27 @@ class _DownloadPageState extends State<DownloadPage> {
     return buttons;
   }
 
-  void _playEpisode(DownloadRecord record, DownloadEpisode episode) {
+  Future<void> _playEpisode(
+      DownloadRecord record, DownloadEpisode episode) async {
+    // 只有已完成才有本地文件（getLocalVideoPath 要求 status==completed）；
+    // 进行中拿不到是正常的——那种情况交给编排层按「边下边播」处理，所以这里
+    // 不再像以前那样直接回一句"本地文件不存在"。
     final localPath = downloadController.getLocalVideoPath(
-      record.mediaId,
-      record.pluginName,
-      episode.episodeNumber,
-    );
-    if (localPath == null) {
-      WywDialog.showToast(message: '本地文件不存在');
-      return;
-    }
+          record.mediaId,
+          record.pluginName,
+          episode.episodeNumber,
+        ) ??
+        '';
 
-    final title = episode.episodeName.isNotEmpty
-        ? episode.episodeName
-        : '第${episode.episodeNumber}集';
-    // 结构化进入：本地文件作为单源单集（type=local）
-    context.pushNamed(
-      '/video/',
-      arguments: VideoPageRouteArgs(
-        videoId: record.mediaId.toString(),
-        title: title,
-        cover: record.mediaCover,
-        sourceKey: record.pluginName,
-        initialSource: 0,
-        initialEpisode: 0,
-        sources: [
-          VideoPlaySource(
-            name: '本地文件',
-            episodes: [
-              VideoPlayEpisode(
-                name: title,
-                path:
-                    PlayResourcePath(url: localPath, type: PlayPathType.local),
-              ),
-            ],
-          ),
-        ],
-      ),
+    // 进播放页统一走编排层：
+    //   - 能用记录的 code 反查到进度记录 → 与「从进度进入」同形（完整源/集
+    //     列表 + 真实 (线路,集) 下标 + 回写进度）；
+    //   - 反查不到（只下载没播过 / 历史被删）→ 完成的是只播这个本地文件且不写
+    //     进度；进行中的用下载记录本身推结构，走合流。
+    await VideoEntryLauncher(context).openFromDownload(
+      record,
+      episode,
+      localPath: localPath,
     );
   }
 

@@ -7,12 +7,15 @@ import 'package:wyw/bean/widget/split_list_row.dart';
 import 'package:wyw/pages/comic_reader/comic_reader_settings_page.dart';
 import 'package:wyw/pages/logs/logs_page.dart';
 import 'package:wyw/pages/plugin/plugin_manager_page.dart';
+import 'package:wyw/pages/settings/collect_settings.dart';
+import 'package:wyw/pages/settings/danmaku/danmaku_settings.dart';
 import 'package:wyw/pages/settings/download_settings.dart';
 import 'package:wyw/pages/settings/interface_settings.dart';
 import 'package:wyw/pages/settings/keyboard_settings.dart';
 import 'package:wyw/pages/settings/player_settings.dart';
 import 'package:wyw/pages/settings/theme_settings_page.dart';
 import 'package:wyw/utils/constants.dart';
+import 'package:wyw/utils/device.dart';
 
 import '../../bean/appbar/app_bar_menu_button.dart';
 
@@ -40,8 +43,10 @@ class _SettingsGroup {
 }
 
 /// 只保留本应用实际提供页面的设置项。
-/// 弹幕相关设置（SettingGroup.danmaku）尚无对应页面，暂不在此列出。
-final List<_SettingsGroup> _settingsGroups = [
+///
+/// 「操作设置」（播放器按键映射）只在桌面有意义：手机/平板没有物理键盘快捷键，
+/// 非桌面端直接不列出（路由仍保留，深链可直达，与语义别名路由同一取向）。
+List<_SettingsGroup> get _settingsGroups => [
   _SettingsGroup(
     title: '资源',
     categories: [
@@ -71,12 +76,20 @@ final List<_SettingsGroup> _settingsGroups = [
         icon: Icons.display_settings_rounded,
         builder: (_) => const PlayerSettingsPage(),
       ),
+      if (isDesktop())
+        _SettingsCategory(
+          id: 'keyboard',
+          label: '操作设置',
+          description: '播放器按键映射',
+          icon: Icons.keyboard_rounded,
+          builder: (_) => const KeyboardSettingsPage(),
+        ),
       _SettingsCategory(
-        id: 'keyboard',
-        label: '操作设置',
-        description: '播放器按键映射',
-        icon: Icons.keyboard_rounded,
-        builder: (_) => const KeyboardSettingsPage(),
+        id: 'danmaku',
+        label: '弹幕设置',
+        description: '弹幕来源与显示效果',
+        icon: Icons.subtitles_rounded,
+        builder: (_) => const DanmakuSettingsPage(),
       ),
     ],
   ),
@@ -108,6 +121,13 @@ final List<_SettingsGroup> _settingsGroups = [
         description: '启动页与展示信息',
         icon: Icons.pages_rounded,
         builder: (_) => const InterfaceSettingsPage(),
+      ),
+      _SettingsCategory(
+        id: 'collect',
+        label: '收藏设置',
+        description: '浏览记录保留策略',
+        icon: Icons.favorite_rounded,
+        builder: (_) => const CollectSettingsPage(),
       ),
     ],
   ),
@@ -170,7 +190,7 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   static const Duration _paneMotion = Duration(milliseconds: 250);
-  static const double _railWidth = 280;
+  static const double _railWidth = 220;
   static const ValueKey<String> _listPageKey =
       ValueKey<String>('settings-list');
 
@@ -244,14 +264,15 @@ class _SettingsPageState extends State<SettingsPage> {
   ) {
     return Scaffold(
       appBar: SysAppBar(
-        title: const Text('设置'),
-        // First route of the nested Navigator, so back must pop the outer one.
-        leading: IconButton(
-          onPressed: () => context.maybePop(),
-          icon: const Icon(Icons.arrow_back),
-        ),
-        actions: [const WywAppBarMenuButton(pagePath: '/settings/'),]
-      ),
+          title: const Text('设置'),
+          // First route of the nested Navigator, so back must pop the outer one.
+          leading: IconButton(
+            onPressed: () => context.maybePop(),
+            icon: const Icon(Icons.arrow_back),
+          ),
+          actions: [
+            const WywAppBarMenuButton(pagePath: '/settings/'),
+          ]),
       body: SafeArea(
         top: false,
         child: Row(

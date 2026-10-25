@@ -1,8 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_modular/flutter_modular.dart';
 import 'package:flutter/services.dart';
 import 'package:wyw/bean/widget/embedded_native_control_area.dart';
+import 'package:wyw/navigation.dart';
+import 'package:wyw/pages/menu/route_visibility.dart';
 import 'package:wyw/pages/router.dart';
+import 'package:wyw/services/platform/screen_orientation.dart';
 import 'package:wyw/utils/double_back_exit.dart';
 
 class ScaffoldMenu extends StatefulWidget {
@@ -12,9 +17,47 @@ class ScaffoldMenu extends StatefulWidget {
   State<ScaffoldMenu> createState() => _ScaffoldMenu();
 }
 
-class _ScaffoldMenu extends State<ScaffoldMenu> {
+class _ScaffoldMenu extends State<ScaffoldMenu> with RouteAware {
   final _outletKey = GlobalKey<RouterOutletState>();
   final _doubleBackExit = DoubleBackExit(toastMessage: '再按一次退出应用');
+
+  /// The shell sits at the bottom of the root stack and stays mounted while
+  /// other pages cover it, so it publishes that state for its subtree.
+  bool _isCovered = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route is PageRoute<void>) {
+      rootRouteObserver.subscribe(this, route);
+    }
+  }
+
+  @override
+  void dispose() {
+    rootRouteObserver.unsubscribe(this);
+    super.dispose();
+  }
+
+  @override
+  void didPushNext() => _setCovered(true);
+
+  @override
+  void didPopNext() {
+    _setCovered(false);
+    // 覆盖页（播放页 / 阅读器）退出后回到「应用方向」。它们自己也会在 dispose 时
+    // 释放方向占用，这里是对账兜底：任何没走 release 的路径都不会把方向留在
+    // 播放页/阅读器那一档上。
+    unawaited(ScreenOrientationService.instance.applyBasePolicy());
+  }
+
+  void _setCovered(bool value) {
+    if (!mounted || _isCovered == value) {
+      return;
+    }
+    setState(() => _isCovered = value);
+  }
 
   void _selectDestination(int index) {
     _doubleBackExit.reset();
@@ -47,19 +90,22 @@ class _ScaffoldMenu extends State<ScaffoldMenu> {
   @override
   Widget build(BuildContext context) {
     final selectedIndex = menu.indexForPath(context.routeState().uri.path);
-    return PopScope(
-      canPop: false,
-      onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) {
-          _handleSystemBack(context);
-        }
-      },
-      child: OrientationBuilder(
-        builder: (context, orientation) {
-          return orientation == Orientation.portrait
-              ? _bottomMenu(context, selectedIndex)
-              : _sideMenu(context, selectedIndex);
+    return RouteVisibility(
+      isCovered: _isCovered,
+      child: PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) {
+            _handleSystemBack(context);
+          }
         },
+        child: OrientationBuilder(
+          builder: (context, orientation) {
+            return orientation == Orientation.portrait
+                ? _bottomMenu(context, selectedIndex)
+                : _sideMenu(context, selectedIndex);
+          },
+        ),
       ),
     );
   }

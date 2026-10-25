@@ -36,12 +36,21 @@ class VideoPageRouteArgs {
     this.onProgressChanged,
     this.playMode = VideoPlayMode.online,
     this.allowProxyPlayback = true,
+    this.followPlayMode = true,
+    this.code,
   });
 
   final String videoId;
   final String title;
   final String cover;
   final String? sourceKey;
+
+  /// 作品级身份（进度记录 `sourceId` / 下载归属）。
+  ///
+  /// 由入口编排层（`VideoEntryLauncher`）构造并传入；为空时按
+  /// [historySourceId] 的旧规则从 `sourceKey`/`videoId` 派生（兼容手动播放
+  /// 等旧入口）。**页面与写回只读 [historySourceId]，不得再自行拼接。**
+  final String? code;
   final List<VideoPlaySource> sources;
   final int initialSource;
   final int initialEpisode;
@@ -55,8 +64,19 @@ class VideoPageRouteArgs {
   /// 「直接播放」时置 false，保证其与「合流播放」语义可区分）。
   final bool allowProxyPlayback;
 
-  /// 目标 sourceId（历史 key 用）：`${sourceKey}:${videoId}`，无 sourceKey 时直接用 videoId。
-  String get historySourceId => (sourceKey == null || sourceKey!.isEmpty)
-      ? videoId
-      : '$sourceKey:$videoId';
+  /// 整页沿用进入时选择的播放方式：true = 切换集数时继续使用
+  /// （默认，与原有行为一致）；false = 仅初始集生效，之后切集按「直接播放」。
+  final bool followPlayMode;
+
+  /// 目标 sourceId（历史 key / 下载归属用）。
+  ///
+  /// 优先取入口编排层传入的 [code]；未提供时退回旧规则
+  /// `'$sourceKey:$videoId'`（无 sourceKey 时直接用 videoId）。
+  String get historySourceId {
+    final explicit = code;
+    if (explicit != null && explicit.isNotEmpty) return explicit;
+    return (sourceKey == null || sourceKey!.isEmpty)
+        ? videoId
+        : '$sourceKey:$videoId';
+  }
 }

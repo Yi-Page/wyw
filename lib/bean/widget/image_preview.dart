@@ -188,7 +188,9 @@ class _ImageViewerState extends State<ImageViewer> {
         onPressed: onPressed,
         icon: Icon(
           icon,
-          color: onPressed != null ? MediaChromeColors.foreground : MediaChromeColors.foregroundDisabled,
+          color: onPressed != null
+              ? MediaChromeColors.foreground
+              : MediaChromeColors.foregroundDisabled,
           size: 32,
         ),
       ),
@@ -212,7 +214,8 @@ class _ImageViewerState extends State<ImageViewer> {
               ),
               child: IconButton(
                 onPressed: _closePreview,
-                icon: const Icon(Icons.close, color: MediaChromeColors.foreground),
+                icon: const Icon(Icons.close,
+                    color: MediaChromeColors.foreground),
               ),
             ),
           ),
@@ -231,7 +234,8 @@ class _ImageViewerState extends State<ImageViewer> {
                   ),
                   child: Text(
                     '${_currentIndex + 1} / ${widget.imageUrls.length}',
-                    style: const TextStyle(color: MediaChromeColors.foreground, fontSize: 14),
+                    style: const TextStyle(
+                        color: MediaChromeColors.foreground, fontSize: 14),
                   ),
                 ),
               ),
@@ -300,7 +304,8 @@ class _ImageViewerState extends State<ImageViewer> {
           scaleStateController: _scaleStateController,
           minScale: PhotoViewComputedScale.contained,
           maxScale: PhotoViewComputedScale.covered * 3,
-          backgroundDecoration: const BoxDecoration(color: MediaChromeColors.surface),
+          backgroundDecoration:
+              const BoxDecoration(color: MediaChromeColors.surface),
           heroAttributes: widget.heroTag != null
               ? PhotoViewHeroAttributes(tag: widget.heroTag!)
               : null,
@@ -323,7 +328,8 @@ class _ImageViewerState extends State<ImageViewer> {
           pageController: _pageController,
           itemCount: widget.imageUrls.length,
           onPageChanged: (index) => setState(() => _currentIndex = index),
-          backgroundDecoration: const BoxDecoration(color: MediaChromeColors.surface),
+          backgroundDecoration:
+              const BoxDecoration(color: MediaChromeColors.surface),
           loadingBuilder: (context, event) => const Center(
             child: CircularProgressIndicator(),
           ),

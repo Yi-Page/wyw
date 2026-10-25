@@ -5,10 +5,10 @@ import 'package:wyw/pages/browse/browse_controller.dart';
 import 'package:wyw/pages/plugin/plugin_controller.dart';
 import 'package:wyw/pages/search/search_controller.dart';
 import 'package:wyw/pages/video/video_controller.dart';
+import 'package:wyw/repositories/collect_repository.dart';
 import 'package:wyw/repositories/download_repository.dart';
 import 'package:wyw/repositories/history_repository.dart';
 import 'package:wyw/repositories/i_history_repository.dart';
-import 'package:wyw/repositories/plugin_history_repository.dart';
 import 'package:wyw/services/download/download_manager.dart';
 import 'package:wyw/services/player/audio_controller.dart';
 import 'package:wyw/services/shaders/shader_asset_service.dart';
@@ -29,8 +29,9 @@ final coreModule = createModule(
           box: GStorage.histories,
         ),
       )
-      // 插件浏览历史（JSON 文件后端，与 IHistoryRepository 完全独立）
-      ..addSingleton<PluginHistoryRepository>(PluginHistoryRepository.new)
+      // 收藏条目（= 插件浏览足迹 + 收藏状态，Hive 后端，
+      // 与 IHistoryRepository 完全独立）
+      ..addSingleton<CollectRepository>(CollectRepository.new)
       // 视频下载
       ..addSingleton<IDownloadRepository>(DownloadRepository.new)
       ..addSingleton<IDownloadManager>(DownloadManager.new)

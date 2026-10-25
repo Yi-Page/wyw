@@ -8,8 +8,16 @@ enum MySpaceDestination {
   manualPlay,
   jsConsole,
   history,
+  collect,
   downloads,
   settings,
+
+  // 常用设置（照 Kazumi「我的」页，直接提到页面上）
+  player,
+  danmaku,
+  comicReader,
+  downloadSettings,
+  rules,
 }
 
 /// 入口强调色档位：只表达「取 ColorScheme 的哪一组 role」，不写死颜色。
@@ -35,12 +43,21 @@ class _MyEntry {
   final _EntryTone tone;
 }
 
-const List<_MyEntry> _entries = <_MyEntry>[
+/// 磁贴化的内容向入口：历史 / 收藏 / 下载（收藏单独开一个磁贴，提到最上方）。
+const List<_MyEntry> _quickTileEntries = <_MyEntry>[
   _MyEntry(
     destination: MySpaceDestination.history,
     icon: Icons.history_rounded,
     title: '历史记录',
     caption: '查看历史记录',
+    tone: _EntryTone.secondary,
+  ),
+  // 收藏 = 重做后的浏览历史（含收藏状态），与「历史记录」（进度历史）分开。
+  _MyEntry(
+    destination: MySpaceDestination.collect,
+    icon: Icons.favorite_rounded,
+    title: '收藏',
+    caption: '浏览记录与收藏状态',
     tone: _EntryTone.secondary,
   ),
   _MyEntry(
@@ -50,6 +67,50 @@ const List<_MyEntry> _entries = <_MyEntry>[
     caption: '缓存任务与本地文件',
     tone: _EntryTone.tertiary,
   ),
+];
+
+/// 常用设置：照 Kazumi「我的」页把常用设置项提到页面上，点击直达对应设置分类。
+/// 顺序按用户指定：规则管理 / 播放设置 / 弹幕设置 / 漫画阅读器 / 下载设置。
+const List<_MyEntry> _preferenceEntries = <_MyEntry>[
+  _MyEntry(
+    destination: MySpaceDestination.rules,
+    icon: Icons.extension_rounded,
+    title: '规则管理',
+    caption: '番剧资源规则',
+    tone: _EntryTone.surface,
+  ),
+  _MyEntry(
+    destination: MySpaceDestination.player,
+    icon: Icons.play_circle_rounded,
+    title: '播放设置',
+    caption: '解码、渲染与播放行为',
+    tone: _EntryTone.surface,
+  ),
+  _MyEntry(
+    destination: MySpaceDestination.danmaku,
+    icon: Icons.subtitles_rounded,
+    title: '弹幕设置',
+    caption: '弹幕来源与显示效果',
+    tone: _EntryTone.surface,
+  ),
+  _MyEntry(
+    destination: MySpaceDestination.comicReader,
+    icon: Icons.auto_stories_rounded,
+    title: '漫画阅读器设置',
+    caption: '阅读模式、翻页与缩放',
+    tone: _EntryTone.surface,
+  ),
+  _MyEntry(
+    destination: MySpaceDestination.downloadSettings,
+    icon: Icons.downloading_rounded,
+    title: '下载设置',
+    caption: '并发数与下载路径',
+    tone: _EntryTone.surface,
+  ),
+];
+
+/// 其余工具入口。
+const List<_MyEntry> _toolEntries = <_MyEntry>[
   _MyEntry(
     destination: MySpaceDestination.manualPlay,
     icon: Icons.play_circle_outline_rounded,
@@ -75,10 +136,7 @@ const List<_MyEntry> _entries = <_MyEntry>[
 ];
 
 /// 磁贴化的两个内容向入口；其余入口走 split-list 行，避免整页磁贴化。
-const Set<MySpaceDestination> _quickTileDestinations = {
-  MySpaceDestination.history,
-  MySpaceDestination.downloads,
-};
+/// （磁贴集已由 [_quickTileEntries] 显式表达，这里不再需要集合判断。）
 
 /// 内容区限宽：规范第三部分第 9 节的 `ContentWidth.page`（my_page = 800）。
 /// 该 token 尚未落地，先在此具名；token 落地后改为引用。
@@ -106,15 +164,6 @@ class MySpaceView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final largeText = MediaQuery.textScalerOf(context).scale(16) > 24;
-    final quickTiles = [
-      for (final entry in _entries)
-        if (_quickTileDestinations.contains(entry.destination)) entry,
-    ];
-    final rows = [
-      for (final entry in _entries)
-        if (!_quickTileDestinations.contains(entry.destination)) entry,
-    ];
-
     return LayoutBuilder(
       builder: (context, constraints) {
         final stackTiles =
@@ -129,23 +178,25 @@ class MySpaceView extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   _QuickTileRow(
-                    entries: quickTiles,
+                    entries: _quickTileEntries,
                     stack: stackTiles,
                     onOpen: onOpen,
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 20),
+                  _sectionLabel(context, '常用设置'),
                   SplitListGroup(
                     outerRadius: _tileRadius,
                     children: [
-                      for (final entry in rows)
-                        SettingsTile(
-                          title: Text(entry.title),
-                          description: Text(entry.caption),
-                          leading: entry.icon,
-                          trailing:
-                              const Icon(Icons.chevron_right_rounded, size: 20),
-                          onPressed: (_) => onOpen(entry.destination),
-                        ),
+                      for (final entry in _preferenceEntries)
+                        _rowTile(context, entry),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+                  _sectionLabel(context, '工具'),
+                  SplitListGroup(
+                    outerRadius: _tileRadius,
+                    children: [
+                      for (final entry in _toolEntries) _rowTile(context, entry),
                     ],
                   ),
                 ],
@@ -154,6 +205,30 @@ class MySpaceView extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+
+  Widget _sectionLabel(BuildContext context, String label) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+      child: Text(
+        label,
+        style: theme.textTheme.titleSmall?.copyWith(
+          color: theme.colorScheme.primary,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+
+  Widget _rowTile(BuildContext context, _MyEntry entry) {
+    return SettingsTile(
+      title: Text(entry.title),
+      description: Text(entry.caption),
+      leading: entry.icon,
+      trailing: const Icon(Icons.chevron_right_rounded, size: 20),
+      onPressed: (_) => onOpen(entry.destination),
     );
   }
 }
@@ -236,7 +311,8 @@ class _QuickTile extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             // 说明文字用容器配对的 on* 全值：叠 alpha 会把对比度压到 4.5:1 以下。
-            Text(entry.caption, style: text.bodySmall?.copyWith(color: foreground)),
+            Text(entry.caption,
+                style: text.bodySmall?.copyWith(color: foreground)),
           ],
         ),
       ),
